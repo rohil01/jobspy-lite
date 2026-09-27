@@ -76,6 +76,33 @@ def test_hours_are_in_config_timezone_not_server_time(clean_settings):
     assert 8 <= local_hour < 22, f"next fire {nxt} outside 8-22 IST"
 
 
+def test_interval_reanchors_daily(clean_settings):
+    """With interval 110 and window 8-22 the chain must be exactly
+    8:00, 9:50, 11:40 … 20:50 IST each day, re-anchored — never drifting."""
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+
+    cfg = {**scheduler.get_config(), "mode": "interval",
+           "timezone": "Asia/Kolkata", "interval_minutes": 110,
+           "active_from": 8, "active_to": 22}
+    trig = scheduler._build_trigger(cfg)
+
+    sim = datetime(2026, 9, 28, 2, 20, tzinfo=timezone.utc)  # 07:50 IST
+    fires = []
+    prev = None
+    for _ in range(12):
+        prev = trig.get_next_fire_time(prev, sim if prev is None else prev + timedelta(seconds=1))
+        fires.append(prev.astimezone(ZoneInfo("Asia/Kolkata")))
+
+    by_day = {}
+    for f in fires:
+        by_day.setdefault(f.date(), []).append(f.strftime("%H:%M"))
+    day1, day2 = list(by_day.values())[0], list(by_day.values())[1]
+    assert day1[0] == "08:00" and day1[1] == "09:50" and day1[2] == "11:40"
+    assert day1[-1] == "20:50", f"last fire before window end: {day1[-1]}"
+    assert day2[0] == "08:00", "next day must re-anchor to 8:00, not drift"
+
+
 def test_hour_window_gate(clean_settings):
     config = {"mode": "interval", "active_from": 8, "active_to": 22}
     assert scheduler._hour_window_ok(config, 9) is True

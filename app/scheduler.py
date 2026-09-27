@@ -18,8 +18,9 @@ from typing import Any, Dict, Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.base import BaseTrigger
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.interval import IntervalTrigger  # noqa: F401 (kept for API compat)
 
 from . import storage
 
@@ -121,22 +122,62 @@ def _next_window_start(config: Dict[str, Any]) -> datetime:
     return anchor
 
 
-def _build_trigger(config: Dict[str, Any]):
-    """Build the APScheduler trigger for a validated config.
+class DailyWindowTrigger(BaseTrigger):
+    """Fire every ``interval_minutes`` minutes, re-anchored to ``active_from``
+    local time each day, only inside the active window.
 
-    Interval ticks anchor to the window start (active_from in the config tz)
-    so fire times land at sane local times instead of 'whenever the scheduler
-    happened to start + k*interval'. Cron fields are interpreted in the
-    config tz as well.
+    active_from=8, active_to=22, interval=110 →
+      day 1: 8:00, 9:50, 11:40, 13:30, 15:20, 17:10, 19:00, 20:50
+      day 2: 8:00, 9:50, …   (re-anchored — no overnight drift)
     """
-    if config["mode"] == "interval":
-        return IntervalTrigger(
-            minutes=int(config["interval_minutes"]),
-            start_date=_next_window_start(config),
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.tz = _tz(config)
+        self.interval = timedelta(minutes=int(config["interval_minutes"]))
+        self.start_hour = int(config.get("active_from", 0))
+        self.end_hour = int(config.get("active_to", 24))
+
+    def _day_anchor(self, reference: datetime) -> datetime:
+        """8:00 (start_hour) local time on the reference's own calendar day."""
+        local = reference.astimezone(self.tz)
+        return local.replace(
+            hour=self.start_hour, minute=0, second=0, microsecond=0
         )
+
+    def get_next_fire_time(
+        self, previous_fire_time, now: datetime
+    ) -> Optional[datetime]:
+        now_local = now.astimezone(self.tz)
+        anchor = self._day_anchor(now if previous_fire_time is None else now)
+
+        # Candidate: next multiple of the interval after `now` within today's
+        # chain (anchor, anchor+interval, …); else tomorrow's anchor.
+        candidate = anchor
+        while candidate <= now_local:
+            candidate += self.interval
+
+        end_of_day = anchor.replace(
+            hour=23, minute=59, second=59, microsecond=999999
+        )
+        if self.end_hour < 24:
+            end_of_day = anchor.replace(
+                hour=self.end_hour, minute=0, second=0, microsecond=0
+            )
+        if candidate < end_of_day:
+            return candidate
+        next_anchor = anchor + timedelta(days=1)
+        return next_anchor
+
+
+def _build_trigger(config: Dict[str, Any]):
+    """Build the APScheduler trigger for a validated config."""
+    if config["mode"] == "interval":
+        return DailyWindowTrigger(config)
     return CronTrigger.from_crontab(
         str(config["cron_expression"]), timezone=_tz(config)
     )
+
 
 
 def _hour_window_ok(config: Dict[str, Any], now_hour: int) -> bool:
