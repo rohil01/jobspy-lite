@@ -79,6 +79,12 @@ variable "image_os_version" {
   default = "22.04"
 }
 
+variable "image_ocid" {
+  type    = string
+  default = ""
+  description = "Pin an exact image OCID; empty = latest Ubuntu for the shape."
+}
+
 locals {
   compartment_id = var.compartment_ocid != "" ? var.compartment_ocid : var.tenancy_ocid
   # E2.1.Micro ignores ocpu/memory args; A1.Flex needs them.
