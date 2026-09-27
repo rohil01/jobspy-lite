@@ -124,6 +124,78 @@ def test_concurrent_run_is_skipped(temp_db, monkeypatch):
     assert results["first"]["status"] == "completed"
 
 
+def test_failed_scoring_is_recorded_and_retried(temp_db, monkeypatch):
+    """AI failures must be tracked (attempts + error) and retried next run —
+    never written as fake verdicts that stick forever."""
+    _seed_context()
+
+    attempts = {"n": 0}
+
+    class FlakyAgent:
+        def _estimate_required_years(self, job):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("NVIDIA down")
+            return {"min": 1, "max": 2}
+
+        def assess_suitability(self, job, resume_text):
+            return {
+                "score": 77, "final_score": 77, "verdict": "good",
+                "matched_skills": ["python"], "missing_skills": [],
+                "reasoning": "ok",
+            }
+
+    class OneJobScraper:
+        def __init__(self, config):
+            pass
+
+        def scrape(self):
+            return [{
+                "title": "Retry Me", "company": "Acme", "site": "linkedin",
+                "job_url": "https://example.com/retry", "description": "d",
+            }]
+
+    import app.pipeline as pipeline_module
+    monkeypatch.setattr(pipeline_module, "JobScraper", OneJobScraper)
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: FlakyAgent())
+    monkeypatch.setattr(
+        pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0
+    )
+
+    # Run 1: agent fails -> run completes, job recorded as failed, no fake verdict
+    s1 = run_pipeline(trigger="manual")
+    assert s1["status"] == "completed"
+    job = storage.get_job("https://example.com/retry")
+    assert job["score_attempts"] == 1
+    assert "NVIDIA down" in job["score_error"]
+    assert job["verdict"] is None and job["score"] is None
+
+    # Run 2: agent healthy -> job scores, bookkeeping cleared
+    s2 = run_pipeline(trigger="manual")
+    assert s2["status"] == "completed" and s2["scored"] == 1
+    job = storage.get_job("https://example.com/retry")
+    assert job["score"] == 77
+    assert job["score_attempts"] == 0 and job["score_error"] is None
+
+
+def test_stale_running_runs_are_reaped(temp_db):
+    """Runs stuck in 'running' (deploy/crash mid-run) get closed out."""
+    from datetime import datetime, timedelta, timezone
+
+    old = storage.create_run("manual")
+    # Backdate the row beyond the reap window.
+    storage.query("UPDATE runs SET started_at = ?", (
+        (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+    ))
+    fresh = storage.create_run("manual")
+
+    reaped = storage.reap_stale_runs(max_age_minutes=30)
+    assert reaped == 1
+    assert storage.get_run(old)["status"] == "failed"
+    assert "interrupted" in storage.get_run(old)["error"]
+    assert storage.get_run(fresh)["status"] == "running"
+
+
 def test_run_pipeline_no_resume_fails_cleanly(temp_db):
     summary = run_pipeline(trigger="manual")
     assert summary["status"] == "failed"

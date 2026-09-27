@@ -7,6 +7,7 @@ const FILTERS = [
   { key: 'all', label: 'All' },
   { key: 'new', label: 'New' },
   { key: 'accepted', label: 'Accepted' },
+  { key: 'ai-failed', label: 'AI failed' },
 ]
 
 export default function JobsView() {
@@ -66,7 +67,11 @@ export default function JobsView() {
 
   const visible = useMemo(() => {
     let list = jobs
-    if (filter !== 'all') list = list.filter((j) => (j.status || 'new') === filter)
+    if (filter === 'ai-failed') {
+      list = list.filter((j) => j.score_error && (j.score_attempts || 0) > 0)
+    } else if (filter !== 'all') {
+      list = list.filter((j) => (j.status || 'new') === filter)
+    }
     if (search.trim()) {
       const needle = search.trim().toLowerCase()
       list = list.filter(

@@ -19,7 +19,7 @@ import sqlite3
 import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     first_seen_at      TEXT NOT NULL,
     last_seen_at       TEXT NOT NULL,
     scored_at          TEXT,
-    scored_with_resume TEXT
+    scored_with_resume TEXT,
+    score_attempts     INTEGER NOT NULL DEFAULT 0,
+    score_error        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
@@ -101,8 +103,20 @@ def connect() -> sqlite3.Connection:
             _conn.execute("PRAGMA journal_mode=WAL")
             _conn.execute("PRAGMA foreign_keys=ON")
             _conn.executescript(_SCHEMA)
+            _migrate()
             _conn.commit()
         return _conn
+
+
+def _migrate() -> None:
+    """Lightweight column additions for pre-existing databases."""
+    cols = {row["name"] for row in _conn.execute("PRAGMA table_info(jobs)")}
+    for name, ddl in (
+        ("score_attempts", "ALTER TABLE jobs ADD COLUMN score_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("score_error", "ALTER TABLE jobs ADD COLUMN score_error TEXT"),
+    ):
+        if name not in cols:
+            _conn.execute(ddl)
 
 
 @contextmanager
@@ -372,6 +386,65 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
     """Recent runs, newest first."""
     return query(
         "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
+    )
+
+
+def reap_stale_runs(max_age_minutes: int = 30) -> int:
+    """Close out runs stuck in 'running' with no heartbeat.
+
+    Covers hard crashes and container restarts mid-run (deploys kill the
+    thread; the DB row used to stay 'running' forever). Returns rows closed.
+    """
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+    ).isoformat()
+    with transaction() as conn:
+        cur = conn.execute(
+            """
+            UPDATE runs
+               SET status = 'failed',
+                   finished_at = ?,
+                   error = COALESCE(error, 'run interrupted (process restart/deploy)')
+             WHERE status = 'running' AND started_at < ?
+            """,
+            (_utc_now(), cutoff),
+        )
+    return cur.rowcount
+
+
+MAX_SCORE_ATTEMPTS = 3
+
+
+def record_score_failure(job_key: str, error: str) -> None:
+    """Bump the attempt counter and store the last error for one job."""
+    with transaction() as conn:
+        conn.execute(
+            """
+            UPDATE jobs
+               SET score_attempts = score_attempts + 1,
+                   score_error = ?
+             WHERE job_key = ?
+            """,
+            (error[:500], job_key),
+        )
+
+
+def clear_score_failure(job_key: str) -> None:
+    """Reset the failure bookkeeping after a successful score."""
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET score_attempts = 0, score_error = NULL WHERE job_key = ?",
+            (job_key,),
+        )
+
+
+def needs_score_retry(row: Dict[str, Any]) -> bool:
+    """A row failed AI scoring before and still has attempts left."""
+    attempts = row.get("score_attempts") or 0
+    return (
+        row.get("score") is None
+        and bool(row.get("score_error"))
+        and attempts < MAX_SCORE_ATTEMPTS
     )
 
 

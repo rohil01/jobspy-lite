@@ -96,6 +96,10 @@ def _scrape(context: PipelineContext) -> List[Dict[str, Any]]:
     return [make_json_safe(job) for job in jobs]
 
 
+class ScoreFailure(Exception):
+    """Both AI agents failed for one job after in-call retries."""
+
+
 def _screen_one(
     agent: AIJobAgent,
     job: Dict[str, Any],
@@ -106,8 +110,18 @@ def _screen_one(
     Agent 1 estimates required experience and, only when it matches the
     window, Agent 2 scores resume suitability (same two-call pattern as the
     original project).
+
+    Raises ScoreFailure when an agent call fails — the caller records the
+    attempt so a later run retries the job. Failures are NEVER written as
+    fake verdicts ("outside experience window" / "unknown"), which used to
+    permanently misclassify real postings.
     """
-    required = agent._estimate_required_years(job)
+    required = None
+    try:
+        required = agent._estimate_required_years(job)
+    except Exception as exc:
+        raise ScoreFailure(f"experience agent: {exc}") from exc
+
     matched = _experience_matches(
         required, context.experience_min, context.experience_max
     )
@@ -115,7 +129,10 @@ def _screen_one(
     annotated["required_years"] = required
     annotated["experience_match"] = matched
     if matched:
-        suitability = agent.assess_suitability(job, context.resume_text)
+        try:
+            suitability = agent.assess_suitability(job, context.resume_text)
+        except Exception as exc:
+            raise ScoreFailure(f"suitability agent: {exc}") from exc
         annotated["score"] = suitability.get("score")
         annotated["final_score"] = suitability.get("final_score")
         annotated["verdict"] = suitability.get("verdict")
@@ -144,6 +161,14 @@ def _needs_scoring(row: Optional[Dict[str, Any]], context: PipelineContext) -> b
         return True
     if row is None:
         return True
+    # A previous AI failure with attempts exhausted is left alone (its error
+    # stays visible in the UI); with attempts left it retries via
+    # needs_score_retry in the run loop.
+    if (
+        row.get("score_error")
+        and (row.get("score_attempts") or 0) >= storage.MAX_SCORE_ATTEMPTS
+    ):
+        return False
     if row.get("score") is None and row.get("required_years_min") is None:
         return True
     if context.resume_hash and row.get("scored_with_resume") != context.resume_hash:
@@ -220,6 +245,11 @@ def _execute_pipeline(
             progress_callback(message, percent)
 
     try:
+        # Close out runs left 'running' by a crash/earlier deploy.
+        reaped = storage.reap_stale_runs()
+        if reaped:
+            logger.info("Reaped %d stale run row(s) from interrupted processes.", reaped)
+
         if not context.resume_text:
             logger.warning("No resume stored — run aborted; upload a resume first.")
             summary["error"] = "No resume stored. Upload a resume before running."
@@ -233,21 +263,28 @@ def _execute_pipeline(
         _report("Scraping job boards…", 0)
         scraped = _scrape(context)
 
-        # ---- 2. Persist raw + detect new -------------------------------- #
+        # ---- 2. Persist raw + detect new + pick up AI retries ----------- #
         _report(f"Persisting {len(scraped)} scraped postings…", 10)
         new_count = 0
         to_score: List[Tuple[str, Dict[str, Any]]] = []
+        retry_count = 0
         for raw_job in scraped:
             key = storage.upsert_job(raw_job)
             existing = storage.get_job(key)
             if existing.get("first_seen_at") == existing.get("last_seen_at"):
                 new_count += 1
-            if _needs_scoring(existing, context):
+            retrying = storage.needs_score_retry(existing)
+            if retrying:
+                retry_count += 1
+            if _needs_scoring(existing, context) or retrying:
                 to_score.append((key, existing))
+        if retry_count:
+            _report(f"{retry_count} failed scoring attempt(s) being retried…", 20)
 
         # ---- 3+4. Score fresh postings concurrently ---------------------- #
         _report(f"{len(to_score)} postings need scoring…", 25)
         scored_count = 0
+        failed_count = 0
         if to_score:
             agent = AIJobAgent(context.config)
             max_workers = min(
@@ -262,13 +299,28 @@ def _execute_pipeline(
                     key = futures[future]
                     try:
                         annotated = future.result()
+                    except ScoreFailure as exc:
+                        failed_count += 1
+                        logger.error("Scoring failed for %s: %s", key, exc)
+                        storage.record_score_failure(key, str(exc))
+                        continue
                     except Exception as exc:  # noqa: BLE001 - per-job failure
+                        failed_count += 1
                         logger.exception("Screening failed for %s", key)
+                        storage.record_score_failure(key, repr(exc))
                         continue
                     storage.upsert_job(annotated, job_key_value=key)
+                    if annotated.get("score") is not None or annotated.get("verdict"):
+                        storage.clear_score_failure(key)
                     scored_count += 1
                     done = 25 + int(70 * scored_count / len(to_score))
                     _report(f"Scored {scored_count}/{len(to_score)}…", min(done, 95))
+        if failed_count:
+            logger.warning(
+                "%d job(s) failed AI scoring this run; they retry automatically "
+                "on the next run (up to %d attempts).",
+                failed_count, storage.MAX_SCORE_ATTEMPTS,
+            )
 
         # ---- 5. Export + notify ------------------------------------------ #
         _report("Exporting to Excel…", 96)

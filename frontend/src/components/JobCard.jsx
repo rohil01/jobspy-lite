@@ -191,6 +191,16 @@ export default function JobCard({ job, onStatus, busy }) {
         {salary ? <span className="badge badge--muted">{salary}</span> : null}
         {job.date_posted ? <span className="badge badge--muted">{String(job.date_posted).slice(0, 10)}</span> : null}
         {job.notified ? <span className="badge badge--muted" title="Telegram alert sent">alerted</span> : null}
+        {job.score_error && (job.score_attempts || 0) > 0 ? (
+          <span
+            className={`badge ${(job.score_attempts || 0) >= 3 ? 'badge--no' : 'badge--warn'}`}
+            title={`AI scoring failed ${job.score_attempts}x: ${job.score_error}`}
+          >
+            {(job.score_attempts || 0) >= 3
+              ? 'AI failed — retries exhausted'
+              : `AI retry ${job.score_attempts}/3 pending`}
+          </span>
+        ) : null}
       </div>
 
       {hasFit ? (
