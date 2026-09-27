@@ -57,6 +57,7 @@ jobs:
       - name: rsync repo to server
         run: |
           rsync -az --delete \
+            -e "ssh -i ~/.ssh/oci_key -o IdentitiesOnly=yes" \
             --exclude .git --exclude .venv --exclude node_modules \
             --exclude frontend/dist --exclude data --exclude .env \
             --exclude __pycache__ --exclude .pytest_cache \
@@ -64,7 +65,8 @@ jobs:
 
       - name: Build + restart (detached), then poll health
         run: |
-          ssh "$OCI_USER@$OCI_HOST" \
+          SSH="ssh -i ~/.ssh/oci_key -o IdentitiesOnly=yes"
+          $SSH "$OCI_USER@$OCI_HOST" \
             'cd ~/app && nohup docker compose up --build -d > build.log 2>&1 & exit 0'
           for i in $(seq 1 40); do
             sleep 15
@@ -75,5 +77,5 @@ jobs:
             fi
           done
           echo "::error::Health check failed after 10 minutes"
-          ssh "$OCI_USER@$OCI_HOST" 'tail -40 ~/app/build.log'
+          $SSH "$OCI_USER@$OCI_HOST" 'tail -40 ~/app/build.log'
           exit 1
