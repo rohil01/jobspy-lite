@@ -57,7 +57,9 @@ jobs:
           path: |
             ${{ env.TF_WORKDIR }}/.terraform
             ${{ env.TF_WORKDIR }}/terraform.tfstate
-          key: tfstate-${{ github.ref_name }}
+          key: tfstate-never-exact-match
+          restore-keys: |
+            tfstate-${{ github.ref_name }}-
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -106,7 +108,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore terraform state
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.TF_WORKDIR }}/.terraform
@@ -124,6 +126,18 @@ jobs:
       - name: Apply
         working-directory: ${{ env.TF_WORKDIR }}
         run: terraform apply -input=false -auto-approve
+
+      # ALWAYS persist state, even when apply fails mid-way — otherwise the
+      # next run re-creates resources that already exist (hit the vcn-count
+      # limit that way).
+      - name: Save terraform state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ env.TF_WORKDIR }}/.terraform
+            ${{ env.TF_WORKDIR }}/terraform.tfstate
+          key: tfstate-${{ github.ref_name }}-${{ github.run_id }}
 
       - name: Print public IP
         working-directory: ${{ env.TF_WORKDIR }}
