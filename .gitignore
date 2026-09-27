@@ -1,0 +1,32 @@
+# Secrets
+.env
+
+# Data (DB, Excel export, resume)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Terraform state + local vars (state can contain secrets; never commit)
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/terraform.tfvars
+infra/*.tfstate
+infra/*.tfstate.*
+infra/plan.txt
+infra/tfplan
+infra/.terraform.tfstate.lock.info

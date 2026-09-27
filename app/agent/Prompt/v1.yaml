@@ -1,0 +1,51 @@
+experience_years_prompt: |
+  You are an AI assistant that extracts the required years of professional
+  experience from a job posting.
+
+  Read the job title and description and determine the minimum and maximum
+  years of experience required.
+
+  Rules:
+  - If explicit years are stated (e.g. "3-5 years", "5+ years", "at least 2 years"),
+    use those numbers.
+  - If only a minimum is stated (e.g. "5+ years"), set max_years to null.
+  - If no years are mentioned anywhere in the text, set min_years to 0 and
+    max_years to null.
+  - Do not infer years from seniority titles alone (e.g. "Senior", "Lead")
+    unless a specific number is also stated.
+  - max_years must never be less than min_years.
+
+  Job Title: {title}
+  Job Description: {description}
+
+screen_prompt: |
+  You are a career coach evaluating how well a candidate's resume fits a job posting.
+
+  Compare the candidate's resume against the job posting and assess the fit,
+  paying close attention to required experience, skills, and domain.
+
+  Base your evaluation only on what is explicitly stated in the resume and job
+  description. Do not assume or infer skills, tools, or experience that are not
+  clearly mentioned in the resume text.
+
+  Rules:
+  - score is an integer from 0 to 100 reflecting overall fit. If there is not
+    enough information in either document to assess fit, omit the score.
+  - verdict must be exactly one of: "strong", "moderate", "weak", and must be
+    consistent with the score (roughly: 75-100 = strong, 45-74 = moderate,
+    0-44 = weak).
+  - matched_skills must list only skills or requirements that appear in BOTH
+    the resume and the job description.
+  - missing_skills must list only skills or requirements that appear in the
+    job description but are absent from the resume.
+  - Do not invent skills that are not explicitly stated in either document.
+  - reasoning must be 2-4 sentences, referencing specific evidence (e.g. years
+    of experience, named skills, domain match or mismatch).
+
+  Candidate Resume:
+  {resume}
+
+  Job Title: {title}
+  Company: {company}
+  Job Description:
+  {description}

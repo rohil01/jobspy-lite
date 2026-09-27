@@ -1,0 +1,64 @@
+name: Deploy app
+
+# Rebuilds the Docker image ON the server and restarts the stack — same path
+# as deploy/deploy-oci.sh, but triggered by a push to master (or by hand).
+# Requires repo secrets:
+#   OCI_HOST     e.g. 129.154.43.128
+#   OCI_SSH_USER e.g. ubuntu
+#   OCI_SSH_KEY  private key (PEM) matching the instance's authorized key
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "app/**"
+      - "frontend/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - "run.py"
+      - ".github/workflows/deploy-app.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.OCI_SSH_KEY }}" > ~/.ssh/oci_key
+          chmod 600 ~/.ssh/oci_key
+          ssh-keyscan -H ${{ secrets.OCI_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+
+      # rsync the working tree (same excludes as deploy-oci.sh). .env lives on
+      # the server already — never ship secrets from CI.
+      - name: rsync repo to server
+        run: |
+          rsync -az --delete \
+            --exclude .git --exclude .venv --exclude node_modules \
+            --exclude frontend/dist --exclude data --exclude .env \
+            --exclude __pycache__ --exclude .pytest_cache \
+            ./ ${{ secrets.OCI_SSH_USER }}@${{ secrets.OCI_HOST }}:~/app/
+
+      - name: Build + restart (detached), then poll health
+        run: |
+          ssh ${{ secrets.OCI_SSH_USER }}@${{ secrets.OCI_HOST }} \
+            'cd ~/app && nohup docker compose up --build -d > build.log 2>&1 & exit 0'
+          for i in $(seq 1 40); do
+            sleep 15
+            if curl -sf -m 5 "http://${{ secrets.OCI_HOST }}:8000/health" > /dev/null; then
+              echo "Healthy after ~$((i*15))s"
+              curl -s "http://${{ secrets.OCI_HOST }}:8000/health"
+              exit 0
+            fi
+          done
+          echo "::error::Health check failed after 10 minutes"
+          ssh ${{ secrets.OCI_SSH_USER }}@${{ secrets.OCI_HOST }} 'tail -40 ~/app/build.log'
+          exit 1

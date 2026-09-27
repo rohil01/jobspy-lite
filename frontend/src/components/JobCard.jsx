@@ -1,0 +1,204 @@
+import { useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { ScoreGauge } from './ui.jsx'
+
+function salaryText(job) {
+  const { min_amount, max_amount, currency, interval } = job
+  if (!min_amount && !max_amount) return null
+  const fmt = (n) => (typeof n === 'number' ? n.toLocaleString() : n)
+  const range =
+    min_amount && max_amount ? `${fmt(min_amount)}–${fmt(max_amount)}` : fmt(min_amount || max_amount)
+  return `${currency || ''} ${range}${interval ? ` / ${interval}` : ''}`.trim()
+}
+
+function requiredYearsText(job) {
+  const { required_years_min, required_years_max } = job
+  if (required_years_min == null && required_years_max == null) return null
+  if (required_years_max == null) return `needs ${required_years_min}+ yrs`
+  if (required_years_min === required_years_max) return `needs ${required_years_min} yrs`
+  return `needs ${required_years_min}–${required_years_max} yrs`
+}
+
+function verdictBadgeClass(verdict) {
+  const v = (verdict || '').toLowerCase()
+  if (v.includes('strong')) return 'badge badge--ok'
+  if (v.includes('good') || v.includes('moderate')) return 'badge badge--warn'
+  if (v.includes('weak') || v.includes('poor')) return 'badge badge--no'
+  return 'badge'
+}
+
+function DetailValue({ value }) {
+  if (value == null || value === '') return <span>—</span>
+  if (Array.isArray(value)) return <span>{value.length ? value.join(', ') : '—'}</span>
+  if (typeof value === 'object') return <span>{JSON.stringify(value)}</span>
+  return <span>{String(value)}</span>
+}
+
+function JobDetails({ job, onClose, onStatus }) {
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
+
+  const entries = Object.entries(job).filter(
+    ([key]) => !['description', 'matched_skills', 'missing_skills'].includes(key),
+  )
+
+  return (
+    <div
+      className="details-modal"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <section className="details-modal__window" role="dialog" aria-modal="true">
+        <div className="details-modal__head">
+          <div>
+            <p className="eyebrow">Posting details</p>
+            <h2>{job.title || 'Untitled role'}</h2>
+            <p className="muted">{job.company || 'Unknown company'}{job.location ? ` · ${job.location}` : ''}</p>
+          </div>
+          <button className="icon-btn" onClick={onClose} aria-label="Close details">×</button>
+        </div>
+        <div className="details-modal__body">
+          <div className="details-ai">
+            <h3>AI assessment</h3>
+            <div className="details-ai__summary">
+              {job.score != null ? <strong className="details-ai__score">{job.score}<small>/100 fit</small></strong> : null}
+              {job.verdict ? <span className={verdictBadgeClass(job.verdict)}>{job.verdict}</span> : null}
+              {job.experience_match != null ? (
+                <span className={job.experience_match ? 'badge badge--ok' : 'badge badge--no'}>
+                  {job.experience_match ? 'matches experience' : 'outside window'}
+                </span>
+              ) : null}
+            </div>
+            {job.matched_skills?.length ? (
+              <div className="details-ai__skills">
+                <b>Matched</b>
+                {job.matched_skills.map((s, i) => <span className="chip chip--ok" key={`m${i}`}>{s}</span>)}
+              </div>
+            ) : null}
+            {job.missing_skills?.length ? (
+              <div className="details-ai__skills">
+                <b>Missing</b>
+                {job.missing_skills.map((s, i) => <span className="chip chip--miss" key={`x${i}`}>{s}</span>)}
+              </div>
+            ) : null}
+            {job.reasoning ? <p className="details-ai__reasoning">{job.reasoning}</p> : null}
+          </div>
+          {job.description ? (
+            <div className="details-modal__description">
+              <h3>Description</h3>
+              <p>{job.description}</p>
+            </div>
+          ) : null}
+          <dl className="details-grid">
+            {entries.map(([key, value]) => (
+              <div className="details-grid__item" key={key}>
+                <dt>{key.replace(/_/g, ' ')}</dt>
+                <dd><DetailValue value={value} /></dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+        <div className="details-modal__foot">
+          {job.job_url ? (
+            <a className="btn btn--primary" href={job.job_url} target="_blank" rel="noreferrer">
+              Open original ↗
+            </a>
+          ) : null}
+          <button className="btn" onClick={onClose}>Close</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+export default function JobCard({ job, onStatus, busy }) {
+  const [detailsJob, setDetailsJob] = useState(null)
+  const salary = salaryText(job)
+  const matched = job.matched_skills || []
+  const missing = job.missing_skills || []
+  const status = job.status || 'new'
+
+  function openFromTile(event) {
+    if (event.target.closest('button, a, input, select, textarea')) return
+    setDetailsJob(job)
+  }
+
+  return (
+    <article className={`card card--${status}`} onClick={openFromTile}>
+      <div className="card__head">
+        <div>
+          <h3 className="card__title">{job.title || 'Untitled role'}</h3>
+          <div className="card__company">
+            {job.company || 'Unknown company'}
+            {job.location ? <span className="card__loc"> · {job.location}</span> : null}
+          </div>
+        </div>
+        <div className="card__actions">
+          <button
+            className={`btn btn--small ${status === 'accepted' ? 'btn--ok' : ''}`}
+            disabled={busy}
+            onClick={() => onStatus(job, 'accepted')}
+            title="Accept this job"
+          >
+            {status === 'accepted' ? 'Accepted ✓' : 'Accept'}
+          </button>
+          <button
+            className={`btn btn--small ${status === 'rejected' ? 'btn--danger' : ''}`}
+            disabled={busy}
+            onClick={() => onStatus(job, 'rejected')}
+            title="Reject this job"
+          >
+            {status === 'rejected' ? 'Rejected ✕' : 'Reject'}
+          </button>
+        </div>
+      </div>
+
+      <div className="badges">
+        {requiredYearsText(job) ? <span className="badge badge--accent">{requiredYearsText(job)}</span> : null}
+        {job.site ? <span className="badge">{job.site}</span> : null}
+        {job.job_type ? <span className="badge">{job.job_type}</span> : null}
+        {job.is_remote ? <span className="badge badge--accent">remote</span> : null}
+        {salary ? <span className="badge badge--muted">{salary}</span> : null}
+        {job.date_posted ? <span className="badge badge--muted">{String(job.date_posted).slice(0, 10)}</span> : null}
+        {job.notified ? <span className="badge badge--muted" title="Telegram alert sent">alerted</span> : null}
+      </div>
+
+      <div className="fit">
+        <ScoreGauge score={typeof job.score === 'number' ? job.score : null} />
+        <div className="fit__body">
+          <div className="fit__verdict">
+            {job.verdict ? <span className={verdictBadgeClass(job.verdict)}>{job.verdict} fit</span> : null}
+            {matched.length || missing.length ? (
+              <span className="badge badge--muted">{matched.length}✓ · {missing.length}✕ skills</span>
+            ) : null}
+          </div>
+          {matched.length || missing.length ? (
+            <div className="chips">
+              {matched.slice(0, 8).map((s, i) => <span key={`m${i}`} className="chip chip--ok">✓ {s}</span>)}
+              {missing.slice(0, 8).map((s, i) => <span key={`x${i}`} className="chip chip--miss">✕ {s}</span>)}
+            </div>
+          ) : null}
+          {job.reasoning ? <p className="fit__why">{job.reasoning}</p> : null}
+        </div>
+      </div>
+
+      <div className="card__foot">
+        <button className="link-btn" onClick={() => setDetailsJob(job)}>View details</button>
+        {job.first_seen_at ? (
+          <span className="card__id">seen {new Date(job.first_seen_at).toLocaleDateString()}</span>
+        ) : null}
+      </div>
+
+      {detailsJob
+        ? createPortal(<JobDetails job={detailsJob} onClose={() => setDetailsJob(null)} />, document.body)
+        : null}
+    </article>
+  )
+}

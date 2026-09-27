@@ -1,0 +1,346 @@
+"""FastAPI application for JobSpy Lite.
+
+Serves the JSON API and (when built) the React SPA from ``frontend/dist``.
+Routes
+------
+GET  /health                liveness + component status
+GET  /                      the SPA (when built)
+POST /resume                upload a .docx resume (stored for all runs)
+GET  /resume                current resume metadata
+GET  /jobs                  list jobs (status filter, order, pagination)
+GET  /jobs/{key}            one job with full details
+POST /jobs/{key}/status     accept/reject/reset a job
+GET  /stats                 counts by status + average score
+GET  /runs                  run history (newest first)
+POST /run                   start a manual pipeline run (background)
+GET  /run/latest            poll the in-flight/last manual run + progress
+GET  /scheduler             scheduler status + config
+POST /scheduler/config      update cron/interval config (live re-applied)
+POST /scheduler/toggle      start/stop the scheduler
+GET  /settings              effective settings (config + stored overrides)
+POST /settings              persist scrape params / experience window / threshold
+GET  /export.xlsx           download the Excel export
+"""
+
+import logging
+import threading
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from . import notify, scheduler, storage
+from .agent.resume_io import extract_text
+from .config import EXCEL_PATH, PROJECT_ROOT
+from .pipeline import PipelineContext, run_pipeline
+from .schemas import (
+    HealthResponse,
+    JobListResponse,
+    JobStatusIn,
+    ResumeInfo,
+    RunLatest,
+    SchedulerStatus,
+    SettingsIn,
+    StatsResponse,
+)
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="JobSpy Lite API",
+    version="0.1.0",
+    description="Scrape jobs, score them against a stored resume, run on a "
+    "schedule, and get Telegram alerts for the best matches.",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-flight manual-run state (process-local; run rows live in SQLite).
+_run_state_lock = threading.Lock()
+_run_state: Dict[str, Any] = {"running": False, "progress": None, "percent": None,
+                              "summary": None, "error": None}
+
+
+def _resume_hash(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(" ".join(text.split()).encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Health
+# --------------------------------------------------------------------------- #
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    from .config import AI_MODEL, DB_PATH, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+    db_ready = False
+    try:
+        storage.query("SELECT 1")
+        db_ready = True
+    except Exception:  # noqa: BLE001 - health must never raise
+        db_ready = False
+    resume = storage.get_setting("resume") or {}
+    return HealthResponse(
+        status="ok",
+        ai_model=AI_MODEL,
+        scheduler_running=scheduler.is_healthy(),
+        resume_uploaded=bool(resume.get("text")),
+        telegram_configured=bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        db_ready=db_ready,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Resume (step 3)
+# --------------------------------------------------------------------------- #
+@app.post("/resume", response_model=ResumeInfo)
+async def upload_resume(resume: UploadFile = File(...)) -> ResumeInfo:
+    """Upload a .docx resume; its text is stored once and used by every run."""
+    data = await resume.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty resume file.")
+    try:
+        text = extract_text(data)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read resume. Only valid .docx files are supported ({exc}).",
+        )
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Resume contained no readable text.")
+
+    fingerprint = _resume_hash(text)
+    from datetime import datetime, timezone
+
+    storage.set_setting(
+        "resume",
+        {"text": text, "name": resume.filename, "hash": fingerprint,
+         "uploaded_at": datetime.now(timezone.utc).isoformat()},
+    )
+    logger.info("Resume stored: name=%s chars=%d", resume.filename, len(text))
+    return ResumeInfo(name=resume.filename, chars=len(text), hash=fingerprint)
+
+
+@app.get("/resume", response_model=ResumeInfo)
+def resume_info() -> ResumeInfo:
+    resume = storage.get_setting("resume") or {}
+    return ResumeInfo(
+        name=resume.get("name"),
+        chars=len(resume.get("text") or "") or None,
+        hash=resume.get("hash"),
+        uploaded_at=resume.get("uploaded_at"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Jobs + accept/reject (step 6)
+# --------------------------------------------------------------------------- #
+@app.get("/jobs", response_model=JobListResponse)
+def list_jobs_endpoint(
+    status: Optional[str] = None,
+    order: str = "score",
+    limit: Optional[int] = None,
+    offset: int = 0,
+) -> JobListResponse:
+    if status and status not in ("new", "accepted", "rejected"):
+        raise HTTPException(status_code=400, detail="status must be new/accepted/rejected.")
+    jobs = storage.list_jobs(status=status, limit=limit, offset=offset, order=order)
+    counts = storage.counts_by_status()
+    return JobListResponse(count=len(jobs), total=counts.get("total", 0), jobs=jobs)
+
+
+@app.get("/jobs/{job_key:path}")
+def get_job_endpoint(job_key: str) -> Dict[str, Any]:
+    job = storage.get_job(job_key)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Unknown job '{job_key}'.")
+    return job
+
+
+@app.post("/jobs/{job_key:path}/status")
+def set_job_status_endpoint(job_key: str, payload: JobStatusIn) -> Dict[str, Any]:
+    try:
+        updated = storage.set_job_status(job_key, payload.new_status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Unknown job '{job_key}'.")
+    return {"job_key": job_key, "status": payload.new_status}
+
+
+@app.get("/stats", response_model=StatsResponse)
+def stats() -> StatsResponse:
+    counts = storage.counts_by_status()
+    return StatsResponse(
+        total=counts.get("total", 0),
+        new=counts.get("new", 0),
+        accepted=counts.get("accepted", 0),
+        rejected=counts.get("rejected", 0),
+        avg_score=counts.get("avg_score"),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Runs + manual trigger (steps 1/4)
+# --------------------------------------------------------------------------- #
+@app.post("/run", status_code=202)
+def start_run(
+    background: BackgroundTasks, force_rescore: bool = False
+) -> Dict[str, Any]:
+    """Start a manual pipeline run in the background; poll /run/latest."""
+    with _run_state_lock:
+        if _run_state.get("running"):
+            raise HTTPException(status_code=409, detail="A run is already in progress.")
+        _run_state.update(running=True, progress="queued", percent=0,
+                          summary=None, error=None)
+
+    def _task() -> None:
+        def _progress(message: str, percent: Optional[float]) -> None:
+            with _run_state_lock:
+                _run_state["progress"] = message
+                _run_state["percent"] = percent
+
+        try:
+            summary = run_pipeline(
+                trigger="manual", force_rescore=force_rescore,
+                progress_callback=_progress,
+            )
+            with _run_state_lock:
+                _run_state.update(running=False, summary=summary,
+                                  error=summary.get("error"))
+        except Exception as exc:  # noqa: BLE001 - surfaced via /run/latest
+            logger.exception("Manual run crashed")
+            with _run_state_lock:
+                _run_state.update(running=False, error=str(exc))
+
+    background.add_task(_task)
+    return {"started": True}
+
+
+@app.get("/run/latest", response_model=RunLatest)
+def run_latest() -> RunLatest:
+    with _run_state_lock:
+        state = dict(_run_state)
+    last_db = storage.list_runs(limit=1)
+    return RunLatest(
+        running=state.get("running", False),
+        progress=state.get("progress"),
+        percent=state.get("percent"),
+        summary=state.get("summary"),
+        error=state.get("error"),
+        last_run=last_db[0] if last_db else None,
+    )
+
+
+@app.get("/runs")
+def runs(limit: int = 50) -> Dict[str, Any]:
+    return {"runs": storage.list_runs(limit=limit)}
+
+
+# --------------------------------------------------------------------------- #
+# Scheduler (step 4)
+# --------------------------------------------------------------------------- #
+@app.get("/scheduler", response_model=SchedulerStatus)
+def scheduler_status() -> SchedulerStatus:
+    return SchedulerStatus(**scheduler.status())
+
+
+@app.post("/scheduler/config", response_model=SchedulerStatus)
+def scheduler_config(config: Dict[str, Any]) -> SchedulerStatus:
+    try:
+        scheduler.set_config(config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return SchedulerStatus(**scheduler.status())
+
+
+@app.post("/scheduler/toggle", response_model=SchedulerStatus)
+def scheduler_toggle(enabled: bool) -> SchedulerStatus:
+    scheduler.toggle(enabled)
+    return SchedulerStatus(**scheduler.status())
+
+
+# --------------------------------------------------------------------------- #
+# Settings
+# --------------------------------------------------------------------------- #
+@app.get("/settings")
+def get_settings() -> Dict[str, Any]:
+    from .config import scrape_defaults
+
+    context = PipelineContext()
+    return {
+        "scrape_params": {**scrape_defaults(), **(storage.get_setting("scrape_params") or {})},
+        "experience_min_years": context.experience_min,
+        "experience_max_years": context.experience_max,
+        "score_threshold": context.score_threshold,
+        "max_workers": context.config.get("max_workers", 4),
+    }
+
+
+@app.post("/settings")
+def update_settings(settings: SettingsIn) -> Dict[str, Any]:
+    if settings.scrape_params is not None:
+        storage.set_setting("scrape_params", settings.scrape_params)
+    if settings.experience_min_years is not None:
+        storage.set_setting("experience_min_years", settings.experience_min_years)
+    if settings.experience_max_years is not None:
+        storage.set_setting("experience_max_years", settings.experience_max_years)
+    if settings.score_threshold is not None:
+        storage.set_setting("score_threshold", settings.score_threshold)
+    return get_settings()
+
+
+# --------------------------------------------------------------------------- #
+# Excel export (step 1)
+# --------------------------------------------------------------------------- #
+@app.get("/export.xlsx")
+def export_xlsx() -> FileResponse:
+    from .excel import export_excel
+
+    path = export_excel()
+    if not path.exists():
+        raise HTTPException(status_code=500, detail="Excel export failed.")
+    return FileResponse(path, filename="jobs.xlsx",
+                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+# --------------------------------------------------------------------------- #
+# Notification test
+# --------------------------------------------------------------------------- #
+@app.post("/notify/test")
+def notify_test() -> Dict[str, Any]:
+    """Send any pending above-threshold matches to Telegram right now."""
+    context = PipelineContext()
+    sent = notify.notify_above_threshold(context.score_threshold)
+    return {"sent": sent}
+
+
+# --------------------------------------------------------------------------- #
+# Static SPA (built frontend)
+# --------------------------------------------------------------------------- #
+_DIST = PROJECT_ROOT / "frontend" / "dist"
+if (_DIST / "index.html").exists():  # pragma: no cover - build-dependent
+    app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+    @app.get("/", include_in_schema=False)
+    def index() -> FileResponse:
+        return FileResponse(_DIST / "index.html")
+else:
+
+    @app.get("/", include_in_schema=False)
+    def index_dev() -> JSONResponse:
+        return JSONResponse(
+            {
+                "message": "JobSpy Lite API is running. The UI is not built yet — "
+                "run `npm run build` in frontend/ or use the Vite dev server."
+            }
+        )

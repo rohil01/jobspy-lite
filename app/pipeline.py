@@ -1,0 +1,304 @@
+"""Pipeline: one full run of JobSpy Lite.
+
+Sequence (each run, cron or manual):
+  1. Scrape every configured search term/site (config + settings overrides).
+  2. Upsert raw jobs so nothing is lost, and detect which are new.
+  3. Score only what needs scoring:
+     - new jobs, or rows with no score yet, or rows whose stored resume hash
+       predates the current resume (resume changed since scoring), or rows
+       last scored more than RESCORE_AFTER_HOURS ago, or ``force_rescore``.
+  4. Persist annotations (required years, experience match, score, skills);
+     user status/notified are preserved by storage.upsert_job.
+  5. Export the jobs table to Excel and send Telegram alerts for
+     above-threshold matches.
+  6. Record everything on a ``runs`` row.
+"""
+
+import logging
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import notify, storage
+from .agent.ai_job_agent import AIJobAgent
+from .scraper import JobScraper
+from .util import make_json_safe
+
+logger = logging.getLogger(__name__)
+
+# A scored job is re-scored only after this many hours (env-tunable). Set 0
+# to disable periodic re-scoring entirely (resume change still triggers it).
+RESCORE_AFTER_HOURS = int(os.environ.get("RESCORE_AFTER_HOURS", "72"))
+
+# One pipeline run at a time, process-wide. The scheduler guard
+# (max_instances=1) and the API's 409 only protect their own path; this lock
+# also stops cron and manual runs from overlapping (duplicate scrapes + the
+# same new job scored twice).
+_PIPELINE_LOCK = threading.Lock()
+
+
+def _experience_matches(
+    required: Optional[Dict[str, Any]],
+    min_years: Optional[int],
+    max_years: Optional[int],
+) -> bool:
+    """True when a posting's required-years window overlaps the target window.
+
+    Same rule as ``AIJobAgent._experience_matches`` — kept here as a module
+    function so the pipeline does not reach through the agent class.
+    """
+    if min_years is None and max_years is None:
+        return True
+    if required is None:
+        return False
+    user_min = min_years or 0
+    job_min, job_max = required.get("min"), required.get("max")
+    below = max_years is not None and (job_min or 0) > max_years
+    above = job_max is not None and job_max < user_min
+    return not (below or above)
+
+
+class PipelineContext:
+    """Everything one pipeline run needs, resolved from config + settings."""
+
+    def __init__(self) -> None:
+        from .config import load_config
+
+        self.config = load_config()
+        self.settings = storage.all_settings()
+        # Scrape params: stored settings override config.py/env defaults.
+        stored_scrape = self.settings.get("scrape_params") or {}
+        self.scrape_params: Dict[str, Any] = {**self.config, **stored_scrape}
+        self.experience_min: int = self.settings.get(
+            "experience_min_years", self.config["experience_min_years"]
+        )
+        stored_max = self.settings.get("experience_max_years")
+        if stored_max is None:
+            self.experience_max = self.config["experience_max_years"]
+        else:
+            # Stored 0/-1 means "open-ended upper bound".
+            self.experience_max = None if stored_max <= 0 else stored_max
+        self.score_threshold: int = self.settings.get(
+            "score_threshold", self.config.get("score_threshold", 70)
+        )
+        self.force_rescore: bool = bool(self.settings.get("force_rescore", False))
+        resume = self.settings.get("resume") or {}
+        self.resume_text: str = resume.get("text", "")
+        self.resume_hash: str = resume.get("hash", "")
+
+
+def _scrape(context: PipelineContext) -> List[Dict[str, Any]]:
+    scraper = JobScraper(dict(context.scrape_params))
+    jobs = scraper.scrape()
+    return [make_json_safe(job) for job in jobs]
+
+
+def _screen_one(
+    agent: AIJobAgent,
+    job: Dict[str, Any],
+    context: PipelineContext,
+) -> Dict[str, Any]:
+    """Run both agents for one posting and return the annotated copy.
+
+    Agent 1 estimates required experience and, only when it matches the
+    window, Agent 2 scores resume suitability (same two-call pattern as the
+    original project).
+    """
+    required = agent._estimate_required_years(job)
+    matched = _experience_matches(
+        required, context.experience_min, context.experience_max
+    )
+    annotated = dict(job)
+    annotated["required_years"] = required
+    annotated["experience_match"] = matched
+    if matched:
+        suitability = agent.assess_suitability(job, context.resume_text)
+        annotated["score"] = suitability.get("score")
+        annotated["final_score"] = suitability.get("final_score")
+        annotated["verdict"] = suitability.get("verdict")
+        annotated["matched_skills"] = suitability.get("matched_skills") or []
+        annotated["missing_skills"] = suitability.get("missing_skills") or []
+        annotated["reasoning"] = suitability.get("reasoning") or ""
+    else:
+        annotated["score"] = None
+        annotated["final_score"] = None
+        annotated["verdict"] = "outside experience window"
+        annotated["matched_skills"] = []
+        annotated["missing_skills"] = []
+        annotated["reasoning"] = "Required experience is outside the selected window."
+    annotated["scored_with_resume"] = context.resume_hash or None
+    return annotated
+
+
+def _needs_scoring(row: Optional[Dict[str, Any]], context: PipelineContext) -> bool:
+    """Decide whether a posting needs (re-)scoring this run.
+
+    A row needs scoring when it is new/unscored, was scored against a
+    different resume, is older than RESCORE_AFTER_HOURS, or the operator
+    forced a rescore.
+    """
+    if context.force_rescore:
+        return True
+    if row is None:
+        return True
+    if row.get("score") is None and row.get("required_years_min") is None:
+        return True
+    if context.resume_hash and row.get("scored_with_resume") != context.resume_hash:
+        return True
+    scored_at = row.get("scored_at")
+    if not scored_at:
+        return True
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(scored_at)
+    except ValueError:
+        return True
+    if RESCORE_AFTER_HOURS <= 0:
+        return False
+    return age > timedelta(hours=RESCORE_AFTER_HOURS)
+
+
+def run_pipeline(
+    trigger: str = "manual",
+    force_rescore: bool = False,
+    progress_callback=None,
+) -> Dict[str, Any]:
+    """Execute one full run; refuse (status ``skipped``) if one is in progress."""
+    if not _PIPELINE_LOCK.acquire(blocking=False):
+        logger.warning(
+            "Run skipped (%s) — another pipeline run is already in progress.", trigger
+        )
+        return {
+            "run_id": None,
+            "trigger": trigger,
+            "status": "skipped",
+            "jobs_scraped": 0,
+            "new_jobs": 0,
+            "scored": 0,
+            "alerts_sent": 0,
+            "duration_s": 0.0,
+            "error": "Another pipeline run is already in progress.",
+        }
+    try:
+        return _execute_pipeline(trigger, force_rescore, progress_callback)
+    finally:
+        _PIPELINE_LOCK.release()
+
+
+def _execute_pipeline(
+    trigger: str = "manual",
+    force_rescore: bool = False,
+    progress_callback=None,
+) -> Dict[str, Any]:
+    """One full pipeline pass (caller must hold _PIPELINE_LOCK).
+
+    Trigger is ``cron`` or ``manual``; ``force_rescore`` bypasses the
+    scoring-skip rules for this run only.
+    """
+    context = PipelineContext()
+    if force_rescore:
+        context.force_rescore = True
+
+    run_id = storage.create_run(trigger)
+    started = time.monotonic()
+    summary: Dict[str, Any] = {
+        "run_id": run_id,
+        "trigger": trigger,
+        "status": "failed",
+        "jobs_scraped": 0,
+        "new_jobs": 0,
+        "scored": 0,
+        "alerts_sent": 0,
+        "duration_s": None,
+        "error": None,
+    }
+
+    def _report(message: str, percent: Optional[float] = None) -> None:
+        if progress_callback is not None:
+            progress_callback(message, percent)
+
+    try:
+        if not context.resume_text:
+            logger.warning("No resume stored — run aborted; upload a resume first.")
+            summary["error"] = "No resume stored. Upload a resume before running."
+            storage.finish_run(
+                run_id, "failed", jobs_scraped=0, new_jobs=0, scored=0,
+                alerts_sent=0, error=summary["error"],
+            )
+            return summary
+
+        # ---- 1. Scrape -------------------------------------------------- #
+        _report("Scraping job boards…", 0)
+        scraped = _scrape(context)
+
+        # ---- 2. Persist raw + detect new -------------------------------- #
+        _report(f"Persisting {len(scraped)} scraped postings…", 10)
+        new_count = 0
+        to_score: List[Tuple[str, Dict[str, Any]]] = []
+        for raw_job in scraped:
+            key = storage.upsert_job(raw_job)
+            existing = storage.get_job(key)
+            if existing.get("first_seen_at") == existing.get("last_seen_at"):
+                new_count += 1
+            if _needs_scoring(existing, context):
+                to_score.append((key, existing))
+
+        # ---- 3+4. Score fresh postings concurrently ---------------------- #
+        _report(f"{len(to_score)} postings need scoring…", 25)
+        scored_count = 0
+        if to_score:
+            agent = AIJobAgent(context.config)
+            max_workers = min(
+                context.config.get("max_workers", 4) or 4, max(1, len(to_score))
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(_screen_one, agent, job, context): key
+                    for key, job in to_score
+                }
+                for future in as_completed(futures):
+                    key = futures[future]
+                    try:
+                        annotated = future.result()
+                    except Exception as exc:  # noqa: BLE001 - per-job failure
+                        logger.exception("Screening failed for %s", key)
+                        continue
+                    storage.upsert_job(annotated, job_key_value=key)
+                    scored_count += 1
+                    done = 25 + int(70 * scored_count / len(to_score))
+                    _report(f"Scored {scored_count}/{len(to_score)}…", min(done, 95))
+
+        # ---- 5. Export + notify ------------------------------------------ #
+        _report("Exporting to Excel…", 96)
+        from .excel import export_excel
+
+        export_excel()
+
+        _report("Checking notifications…", 97)
+        alerts = notify.notify_above_threshold(context.score_threshold)
+
+        summary.update(
+            status="completed",
+            jobs_scraped=len(scraped),
+            new_jobs=new_count,
+            scored=scored_count,
+            alerts_sent=alerts,
+        )
+        storage.finish_run(
+            run_id,
+            "completed",
+            jobs_scraped=len(scraped),
+            new_jobs=new_count,
+            scored=scored_count,
+            alerts_sent=alerts,
+        )
+        _report("Done.", 100)
+    except Exception as exc:  # noqa: BLE001 - record failure on the run row
+        logger.exception("Pipeline run failed")
+        summary["error"] = str(exc)
+        storage.finish_run(run_id, "failed", error=str(exc))
+
+    summary["duration_s"] = round(time.monotonic() - started, 1)
+    return summary

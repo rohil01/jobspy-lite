@@ -1,0 +1,47 @@
+#cloud-config
+# Oracle Cloud first-boot setup for JobSpy Lite.
+# Paste this into the "Management > Add cloud-init script" box (or the
+# "Paste cloud-init script" tab) when creating the instance.
+#
+# What it does:
+#   1. Installs Docker Engine + the compose plugin
+#   2. Lets the 'ubuntu' user run docker without sudo
+#   3. Opens firewall ports 8000 (app) and 80 (future reverse proxy)
+#      -- OCI Ubuntu images ship with iptables locked to SSH only; without
+#      this the app is unreachable even with a correct Security List.
+#   4. Adds a 2GB swapfile so small shapes (E2.1.Micro, 1GB RAM) survive
+#      the docker build (harmless on bigger shapes).
+#
+# First boot takes ~2-3 minutes. Check with: ssh ubuntu@IP "cloud-init status"
+
+package_update: true
+packages:
+  - docker.io
+  - docker-compose-v2
+
+write_files:
+  - path: /etc/sysctl.d/99-jobspy.conf
+    content: |
+      vm.swappiness=10
+  - path: /root/oci-firewall.sh
+    permissions: "0700"
+    content: |
+      #!/bin/bash
+      # OCI Ubuntu images ship restrictive iptables rules (SSH only).
+      # Insert ACCEPT rules for the app ports ahead of the REJECT rules.
+      iptables -I INPUT 5 -p tcp --dport 8000 -j ACCEPT
+      iptables -I INPUT 5 -p tcp --dport 80 -j ACCEPT
+      netfilter-persistent save
+
+runcmd:
+  - systemctl enable --now docker
+  - usermod -aG docker ubuntu
+  # 2GB swap (E2.1.Micro has 1GB RAM; the image build needs more)
+  - fallocate -l 2G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo "/swapfile none swap sw 0 0" >> /etc/fstab
+  - sysctl --system
+  - apt-get install -y iptables-persistent
+  - bash /root/oci-firewall.sh

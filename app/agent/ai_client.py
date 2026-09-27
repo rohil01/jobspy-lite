@@ -1,0 +1,111 @@
+"""Simple OpenAI-compatible client (default: NVIDIA NIM), using native
+structured outputs via chat.completions.parse()."""
+
+import logging
+import os
+import random
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from dotenv import load_dotenv
+from openai import OpenAI
+from pydantic import BaseModel
+
+
+logger = logging.getLogger(__name__)
+
+MAX_PARSE_ATTEMPTS = 10
+INITIAL_RETRY_DELAY_SECONDS = 2.0
+MAX_RETRY_DELAY_SECONDS = 120
+
+# NVIDIA returns 429 (quota) and 503 (overloaded) as bursts; both are worth
+# waiting out — the shared limiter paces everything else.
+RETRYABLE_STATUS_CODES = {408, 409, 429, 500, 502, 503, 504}
+
+
+
+
+class AIClient:
+    """Thin wrapper around an OpenAI-compatible chat.completions API."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        project_root = Path(__file__).resolve().parents[2]
+        load_dotenv(project_root / ".env")
+
+        config = config or {}
+        self.ai_model = config.get("ai_model", "")
+        api_key = config.get("api_key") or os.environ.get("NVIDIA_API_KEY")
+        base_url = config.get("ai_base_url", "https://integrate.api.nvidia.com/v1")
+
+        # max_retries=0: the SDK's internal retries bypass our rate limiter,
+        # which let bursts exceed NVIDIA's cap (429s). Our parse() retry loop
+        # owns all retrying, so every attempt is rate-limited.
+        self._client = OpenAI(
+            api_key=api_key or "not-used",
+            base_url=base_url,
+            max_retries=0,
+        )
+        
+
+    def parse(
+        self,
+        messages: list,
+        text_format: type,
+        temperature: float = 0.0,
+        label: str = "ai-call",
+    ):
+        """Chat completion with native structured output, validated against text_format.
+
+        Transient NVIDIA errors (429/503 bursts) are retried with exponential
+        backoff + jitter; permanent errors fail fast to the caller. ``label``
+        (e.g. the job title) is included in every log line so retries and
+        rate-limit waits are traceable per job.
+        """
+        last_error = None
+
+        for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
+            try:
+                response = self._client.beta.chat.completions.parse(
+                    model=self.ai_model,
+                    messages=messages,
+                    response_format=text_format,
+                    temperature=temperature,
+                )
+                message = response.choices[0].message
+                parsed = message.parsed
+                if parsed is None:
+                    refusal = getattr(message, "refusal", None)
+                    detail = f"AI returned no structured {text_format.__name__} response"
+                    if refusal:
+                        detail += f": {refusal}"
+                    raise ValueError(detail)
+                # Validate even when the SDK returns a model instance. This
+                # keeps the retry policy responsible for every bad response.
+                result = text_format.model_validate(parsed)
+                if attempt > 1:
+                    logger.info("%s: succeeded on attempt %d/%d", label, attempt, MAX_PARSE_ATTEMPTS)
+                return result
+            except Exception as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                permanent = status is not None and status not in RETRYABLE_STATUS_CODES
+                if attempt == MAX_PARSE_ATTEMPTS or permanent:
+                    logger.error(
+                        "%s: FAILED after %d attempts%s: %s",
+                        label, attempt, " (permanent error)" if permanent else "", exc,
+                    )
+                    break
+                delay = min(
+                    INITIAL_RETRY_DELAY_SECONDS * (2 ** (attempt - 1)),
+                    MAX_RETRY_DELAY_SECONDS,
+                )
+                delay += random.uniform(0, delay / 2)  # jitter: spread retries out
+                logger.warning(
+                    "%s: attempt %d/%d failed (%s); retrying in %.1fs",
+                    label, attempt, MAX_PARSE_ATTEMPTS,
+                    f"HTTP {status}" if status else exc, delay,
+                )
+                time.sleep(delay)
+
+        raise last_error

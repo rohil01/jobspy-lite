@@ -1,0 +1,141 @@
+"""AI Job Agent — two agents over an OpenAI-compatible endpoint.
+
+Agent 1  ``_estimate_required_years``: estimate the required years of
+                                         experience for one posting.
+Agent 2  ``assess_suitability``       : score how well a resume fits a job.
+"""
+
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional
+from .rate_limiter import NVIDIA_RATE_LIMITER
+import yaml
+_RATE_LIMIT_CONFIGURED = False
+
+from .ai_client import AIClient
+from .schema import ExperienceYearsOutput, SuitabilityOutput
+
+logger = logging.getLogger(__name__)
+
+def configure_rate_limit() -> None:
+    """Apply AI_RATE_LIMIT_PER_MIN to the shared limiter, at most once.
+    Called lazily (env may be loaded after import time via .env)."""
+    global _RATE_LIMIT_CONFIGURED
+    if _RATE_LIMIT_CONFIGURED:
+        return
+    _RATE_LIMIT_CONFIGURED = True
+    try:
+        from ..config import AI_RATE_LIMIT_PER_MIN
+        if AI_RATE_LIMIT_PER_MIN > 0 and AI_RATE_LIMIT_PER_MIN != NVIDIA_RATE_LIMITER.max_calls:
+            NVIDIA_RATE_LIMITER.max_calls = AI_RATE_LIMIT_PER_MIN
+            logger.info("AI rate limit set to %d calls/minute", AI_RATE_LIMIT_PER_MIN)
+    except Exception:  # noqa: BLE001 - config is optional in tests/tools
+        logger.debug("Could not read AI_RATE_LIMIT_PER_MIN; keeping default", exc_info=True)
+
+class AIJobAgent:
+    """Filters jobs by experience and assesses resume suitability."""
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.prompt_path = Path(__file__).resolve().parent / "Prompt" / "v1.yaml"
+        self.config = config or {}
+        self.client = AIClient(config=self.config)
+        self.ai_model = self.client.ai_model
+        self._prompts: Optional[Dict[str, str]] = None
+        configure_rate_limit()
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+    def _load_prompts(self) -> Dict[str, str]:
+        if self._prompts is None:
+            with self.prompt_path.open(encoding="utf-8") as handle:
+                self._prompts = yaml.safe_load(handle)
+        return self._prompts
+
+    # ------------------------------------------------------------------ #
+    # Agent 1 — experience-years estimate
+    # ------------------------------------------------------------------ #
+    def _estimate_required_years(self, job: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        waited = NVIDIA_RATE_LIMITER.acquire()  # blocks until a slot is free
+        if waited > 1.0:
+            logger.info(
+                "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
+                "ai-call", waited, NVIDIA_RATE_LIMITER.recent_count(),
+                NVIDIA_RATE_LIMITER.max_calls,
+            )
+
+
+        prompt = self._load_prompts()["experience_years_prompt"].format(
+            title=job.get("title", ""),
+            description=job.get("description", ""),
+        )
+        try:
+            data = self.client.parse(
+                messages=[{"role": "user", "content": prompt}],
+                text_format=ExperienceYearsOutput,
+                label=f"experience[{job.get('title', '?')} @{job.get('company', '?')}]",
+            )
+        except Exception:
+            logger.exception(
+                "Experience estimation failed for job id=%s model=%s",
+                job.get("id"),
+                self.ai_model,
+            )
+            return None
+        return {"min": data.min_years, "max": data.max_years}
+
+    @staticmethod
+    def _experience_matches(
+        required: Optional[Dict[str, Any]],
+        min_years: Optional[int],
+        max_years: Optional[int],
+    ) -> bool:
+        if min_years is None and max_years is None:
+            return True
+        if required is None:
+            return False
+        user_min = min_years or 0
+        user_max = max_years
+        job_min, job_max = required["min"], required["max"]
+        below = user_max is not None and job_min > user_max
+        above = job_max is not None and job_max < user_min
+        return not (below or above)
+
+    # ------------------------------------------------------------------ #
+    # Agent 2 — resume suitability assessment
+    # ------------------------------------------------------------------ #
+    def assess_suitability(self, job: Dict[str, Any], resume_text: str) -> Dict[str, Any]:
+        """Assess how well resume_text fits job. Returns score, verdict, skills, reasoning."""
+        waited = NVIDIA_RATE_LIMITER.acquire()  # blocks until a slot is free
+        if waited > 1.0:
+            logger.info(
+                "%s: waited %.1fs for a rate-limit slot (call %d/%d this window)",
+                "ai-call", waited, NVIDIA_RATE_LIMITER.recent_count(),
+                NVIDIA_RATE_LIMITER.max_calls,
+            )
+        prompt = self._load_prompts()["screen_prompt"].format(
+            resume=resume_text,
+            title=job.get("title", ""),
+            company=job.get("company", ""),
+            description=job.get("description", ""),
+        )
+        try:
+            data = self.client.parse(
+                messages=[{"role": "user", "content": prompt}],
+                text_format=SuitabilityOutput,
+                temperature=0.2,
+                label=f"fit[{job.get('title', '?')} @{job.get('company', '?')}]",
+            )
+        except Exception:
+            logger.exception(
+                "Suitability parsing failed for job id=%s model=%s",
+                job.get("id"),
+                self.ai_model,
+            )
+            return {
+                "score": None,
+                "verdict": "unknown",
+                "matched_skills": [],
+                "missing_skills": [],
+                "reasoning": "Could not parse the AI response.",
+            }
+        return data.model_dump()

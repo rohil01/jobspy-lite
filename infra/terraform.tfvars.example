@@ -1,0 +1,25 @@
+# Copy to infra/terraform.tfvars (gitignored) and fill in.
+# Where to find these: OCI Console → Profile icon → User settings → API keys
+# → "Generate API Key" (gives fingerprint + a PEM you download).
+# The PEM body goes into api_private_key; the same user needs an SSH key
+# added under "SSH keys" for console access (separate from API keys).
+
+tenancy_ocid     = "ocid1.tenancy.oc1..aaaaaaaa..."
+user_ocid        = "ocid1.user.oc1..aaaaaaaa..."
+fingerprint      = "aa:bb:cc:..."
+region           = "us-ashburn-1"
+private_key      = file("~/path/to/oci_api_key.pem")   # PEM body of the API signing key
+
+compartment_ocid = ""                                  # "" = tenancy root
+availability_domain = 1
+
+# Always-Free AMD micro (what the current server uses):
+instance_shape = "VM.E2.1.Micro"
+# Or the free ARM shape (much faster builds) if there is capacity:
+# instance_shape = "VM.Standard.A1.Flex"
+# a1_ocpus       = 2
+# a1_memory_gb   = 12
+
+ssh_public_key = "ssh-ed25519 AAAA... rohil@jobspy-lite"
+
+app_port = 8000
