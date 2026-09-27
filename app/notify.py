@@ -40,15 +40,31 @@ def _select_candidates(threshold: int) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def format_alert(candidates: List[Dict[str, Any]], top_n: int) -> Optional[str]:
-    """Render the batched alert message (None when nothing to send).
+TELEGRAM_MESSAGE_LIMIT = 4000  # hard cap 4096; leave headroom
 
-    Telegram captions/messages cap at 4096 chars; the formatter truncates.
+
+def format_alert_chunks(
+    candidates: List[Dict[str, Any]],
+) -> List[str]:
+    """Render the alert as one or more messages (None-safe empty list).
+
+    EVERY above-threshold job is included — no top-N cap. Telegram's 4096-char
+    limit is handled by starting a new message when one fills up.
     """
     if not candidates:
-        return None
-    lines = [f"🎯 {len(candidates)} new job match(es) above threshold:"]
-    for job in candidates[:top_n]:
+        return []
+    messages: List[str] = []
+    lines: List[str] = []
+
+    def flush():
+        if lines:
+            messages.append("\n".join(lines).strip())
+            lines.clear()
+
+    header = f"🎯 {len(candidates)} new job match(es) above threshold:"
+    lines.append(header)
+
+    for job in candidates:
         skills = ", ".join((job.get("matched_skills") or [])[:3])
         line = (
             f"\n• {job.get('title') or 'Untitled'} @ {job.get('company') or '?'}"
@@ -60,11 +76,16 @@ def format_alert(candidates: List[Dict[str, Any]], top_n: int) -> Optional[str]:
             line += f"\n  ✓ {skills}"
         if job.get("job_url"):
             line += f"\n  {job['job_url']}"
+        # A single job entry must never overflow a message on its own.
+        if len(line) > TELEGRAM_MESSAGE_LIMIT:
+            line = line[: TELEGRAM_MESSAGE_LIMIT - 20] + "\n  …"
+        if sum(len(l) for l in lines) + len(line) > TELEGRAM_MESSAGE_LIMIT:
+            flush()
+            lines.append(header)
         lines.append(line)
-    message = "\n".join(lines)
-    if len(message) > 4000:
-        message = message[:4000] + "\n…"
-    return message
+
+    flush()
+    return messages
 
 
 def send_telegram(message: str, bot_token: str, chat_id: str, timeout: float = 10.0) -> bool:
@@ -96,18 +117,17 @@ def notify_above_threshold(
     *,
     bot_token: Optional[str] = None,
     chat_id: Optional[str] = None,
-    top_n: Optional[int] = None,
 ) -> int:
-    """Alert about unsent above-threshold matches; return how many were sent.
+    """Alert about EVERY unsent above-threshold match; return how many were sent.
 
-    Only jobs actually included in a delivered message are marked ``notified``.
-    When Telegram is unconfigured the selection is still computed (and logged)
-    but nothing is marked, so a later configured run alerts everything pending.
+    No top-N cap: all candidates go out, chunked across as many messages as
+    Telegram's size limit requires. Only jobs in delivered messages are marked
+    ``notified``. When Telegram is unconfigured the selection is still computed
+    (and logged) but nothing is marked, so a later configured run alerts them.
     """
-    from .config import NOTIFY_TOP_N, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    from .config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
 
     effective_threshold = threshold if threshold is not None else 70
-    effective_top_n = top_n if top_n is not None else NOTIFY_TOP_N
     token = bot_token if bot_token is not None else TELEGRAM_BOT_TOKEN
     chat = chat_id if chat_id is not None else TELEGRAM_CHAT_ID
 
@@ -115,8 +135,8 @@ def notify_above_threshold(
     if not candidates:
         return 0
 
-    message = format_alert(candidates, effective_top_n)
-    if message is None:
+    messages = format_alert_chunks(candidates)
+    if not messages:
         return 0
 
     if not token or not chat:
@@ -127,9 +147,27 @@ def notify_above_threshold(
         )
         return 0
 
-    if not send_telegram(message, token, chat):
-        return 0
+    sent_keys: List[str] = []
+    for index, message in enumerate(messages):
+        if not send_telegram(message, token, chat):
+            logger.error(
+                "Telegram message %d/%d failed; %d job(s) remain pending "
+                "and will retry next run.",
+                index + 1, len(messages), len(candidates) - len(sent_keys),
+            )
+            break
+        # Mark exactly the jobs that went out in this delivered chunk.
+        chunk_keys = [job["job_key"] for job in candidates if job["job_key"] not in sent_keys]
+        chunk_keys = chunk_keys[: _jobs_in_chunk(candidates, sent_keys, message)]
+        sent_keys.extend(chunk_keys)
 
-    selected = {job["job_key"] for job in candidates[:effective_top_n]}
-    storage.mark_notified(sorted(selected))
-    return len(selected)
+    if sent_keys:
+        storage.mark_notified(sorted(set(sent_keys)))
+    return len(sent_keys)
+
+
+def _jobs_in_chunk(candidates, already_sent, message) -> int:
+    """How many pending candidates the delivered message contained."""
+    # Chunks are built in candidate order, so count the entries in the
+    # delivered text ("• " bullets) beyond what earlier chunks covered.
+    return message.count("\n• ")

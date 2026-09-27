@@ -104,7 +104,6 @@ EXCEL_PATH: Path = DATA_DIR / "jobs.xlsx"
 # --------------------------------------------------------------------------- #
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
-NOTIFY_TOP_N: int = _env_int("NOTIFY_TOP_N", 10)
 
 # AI client tuning
 AI_RATE_LIMIT_PER_MIN: int = _env_int("AI_RATE_LIMIT_PER_MIN", 30)

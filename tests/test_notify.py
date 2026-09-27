@@ -53,13 +53,19 @@ def test_select_candidates_threshold(seeded):
 
 
 def test_format_alert_batches_and_truncates(seeded):
-    message = notify.format_alert(notify._select_candidates(70), top_n=10)
-    assert message is not None
-    assert "Role above" in message
-    assert "Acme" in message
-    huge = [_job(f"j{i}", score=90) for i in range(200)]
-    truncated = notify.format_alert(huge, top_n=10)
-    assert len(truncated) <= 4100
+    chunks = notify.format_alert_chunks(notify._select_candidates(70))
+    assert len(chunks) == 1
+    assert "Role above" in chunks[0]
+    assert "Acme" in chunks[0]
+    huge = [_job(f"j{i}", score=90) for i in range(500)]
+    chunks = notify.format_alert_chunks(huge)
+    assert len(chunks) > 1, "500 jobs must span multiple Telegram messages"
+    for chunk in chunks:
+        assert len(chunk) <= 4100
+    # Every candidate appears somewhere across the chunks — nothing dropped.
+    joined = "\n".join(chunks)
+    for i in (0, 199, 499):
+        assert f"https://example.com/j{i}" in joined
 
 
 def test_notify_marks_only_sent(seeded, monkeypatch):
@@ -96,9 +102,24 @@ def test_notify_no_candidates(temp_db):
     assert notify.notify_above_threshold(70, bot_token="tok", chat_id="chat") == 0
 
 
-def test_top_n_limits_marking(seeded, monkeypatch):
-    for i in range(5):
+def test_all_above_threshold_are_sent(seeded, monkeypatch):
+    """No top-N cap: every qualifying job goes out and gets marked."""
+    for i in range(12):  # well past the old default top_n=10
         storage.upsert_job(_job(f"extra{i}", score=80 + i))
-    monkeypatch.setattr(notify, "send_telegram", lambda *a, **k: True)
-    sent = notify.notify_above_threshold(70, bot_token="tok", chat_id="chat", top_n=2)
-    assert sent == 2
+    sent_messages = []
+
+    def fake_send(message, token, chat):
+        sent_messages.append(message)
+        return True
+
+    monkeypatch.setattr(notify, "send_telegram", fake_send)
+    sent = notify.notify_above_threshold(70, bot_token="tok", chat_id="chat")
+    assert sent == 13  # 1 seeded above-threshold + 12 extra
+    pending = storage.query(
+        """
+        SELECT COUNT(*) AS n FROM jobs
+         WHERE score >= 70 AND experience_match = 1
+           AND status != 'rejected' AND notified = 0
+        """
+    )
+    assert pending[0]["n"] == 0
