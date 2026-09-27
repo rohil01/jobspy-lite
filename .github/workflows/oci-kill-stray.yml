@@ -42,12 +42,10 @@ jobs:
           for i in instances:
               print(f"  {i.display_name} | {i.lifecycle_state} | {i.time_created} | {i.id}")
 
-          strays = [i for i in instances
-                    if i.display_name.startswith("jobspy-")
-                    and i.lifecycle_state in ("PROVISIONING", "STARTING", "RUNNING", "STOPPED")]
+          strays = [i for i in instances if i.display_name == "jobspy-debug" and i.lifecycle_state in ("PROVISIONING", "STARTING", "RUNNING", "STOPPED")]
 
           if not strays:
-              print("\nNo stray jobspy-* instances to terminate.")
+              print("\nNo stray jobspy-debug instances to terminate.")
               raise SystemExit(0)
 
           for inst in strays:
@@ -64,12 +62,11 @@ jobs:
           print("\nWaiting for termination to settle...")
           for _ in range(30):
               time.sleep(20)
-              remaining = [i for i in compute.list_instances(comp).data
-                           if i.display_name.startswith("jobspy-")
-                           and i.lifecycle_state not in ("TERMINATED", "TERMINATING")]
+              remaining = [i for i in compute.list_instances(comp).data if i.display_name == "jobspy-debug" and i.lifecycle_state not in ("TERMINATED", "TERMINATING")]
               if not remaining:
                   break
           print("Done. Final state:")
           for i in compute.list_instances(comp).data:
-              print(f"  {i.display_name} | {i.lifecycle_state}")
+              if i.display_name == "jobspy-debug":
+                  print(f"  {i.display_name} | {i.lifecycle_state}")
           PY

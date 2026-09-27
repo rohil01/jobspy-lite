@@ -53,7 +53,7 @@ bash deploy/deploy-oci.sh ubuntu@<IP>
 - `jobspy-vcn` (10.0.0.0/16) + internet gateway + route table
 - public subnet `10.0.1.0/24`
 - security list: ingress 22 (SSH) + 8000 (app), ICMP, all egress
-- instance `jobspy-lite` (default `VM.E2.1.Micro`; switch to
+- instance `jobspy-lite` (default `VM.Standard.E2.1.Micro`; switch to
   `VM.Standard.A1.Flex` in tfvars when capacity allows)
 - first boot: cloud-init installs Docker + compose plugin, adds a 2GB swapfile,
   opens ports 8000/80 in the OS firewall

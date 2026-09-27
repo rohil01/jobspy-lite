@@ -79,8 +79,8 @@ jobs:
                   inst = compute.launch_instance(launch).data
                   print("\nLAUNCH OK:", inst.id, inst.lifecycle_state)
                   print("Terminating debug instance...")
-                  compute.terminate_instance(inst.id, wait_for_states=["TERMINATING"])
-                  print("Cleanup done.")
+                  compute.terminate_instance(inst.id)
+                  print("Termination requested.")
               except ServiceError as e:
                   print(f"\nLAUNCH FAILED: status={e.status} code={e.code}")
                   print("message:", e.message)

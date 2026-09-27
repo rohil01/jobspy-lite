@@ -45,8 +45,8 @@ variable "availability_domain" {
 
 variable "instance_shape" {
   type        = string
-  description = "Shape. E2.1.Micro is Always Free; A1.Flex needs ocpus/memory set."
-  default     = "VM.E2.1.Micro"
+  description = "Shape. VM.Standard.E2.1.Micro is Always Free; A1.Flex needs ocpus/memory set."
+  default     = "VM.Standard.E2.1.Micro"
 }
 
 variable "a1_ocpus" {

@@ -14,7 +14,7 @@ compartment_ocid = ""                                  # "" = tenancy root
 availability_domain = 1
 
 # Always-Free AMD micro (what the current server uses):
-instance_shape = "VM.E2.1.Micro"
+instance_shape = "VM.Standard.E2.1.Micro"
 # Or the free ARM shape (much faster builds) if there is capacity:
 # instance_shape = "VM.Standard.A1.Flex"
 # a1_ocpus       = 2
