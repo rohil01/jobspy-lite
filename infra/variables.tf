@@ -82,9 +82,5 @@ variable "image_os_version" {
 locals {
   compartment_id = var.compartment_ocid != "" ? var.compartment_ocid : var.tenancy_ocid
   # E2.1.Micro ignores ocpu/memory args; A1.Flex needs them.
-  is_flex  = replace(var.instance_shape, "A1.Flex", "") != var.instance_shape
-  shape_args = local.is_flex ? {
-    ocpus = var.a1_ocpus
-    memory_in_gbs = var.a1_memory_gb
-  } : {}
+  is_flex = replace(var.instance_shape, "A1.Flex", "") != var.instance_shape
 }

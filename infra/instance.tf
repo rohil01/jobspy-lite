@@ -20,14 +20,13 @@ resource "oci_core_instance" "app" {
   compartment_id      = local.compartment_id
   display_name        = "jobspy-lite"
 
-  shape {
-    shape = var.instance_shape
-    dynamic "shape_config" {
-      for_each = local.is_flex ? [1] : []
-      content {
-        ocpus         = local.shape_args.ocpus
-        memory_in_gbs = local.shape_args.memory_in_gbs
-      }
+  shape = var.instance_shape
+
+  dynamic "shape_config" {
+    for_each = local.is_flex ? [1] : []
+    content {
+      ocpus         = var.a1_ocpus
+      memory_in_gbs = var.a1_memory_gb
     }
   }
 
