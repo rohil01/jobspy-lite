@@ -1,0 +1,90 @@
+name: OCI debug launch (one-off)
+
+# Temporary diagnostic: reproduce LaunchInstance outside Terraform to get the
+# real API error (the provider hides the message behind NotAuthorizedOrNotFound).
+
+on:
+  workflow_dispatch:
+
+env:
+  TF_VAR_tenancy_ocid: ${{ secrets.TF_VAR_TENANCY_OCID }}
+  TF_VAR_user_ocid: ${{ secrets.TF_VAR_USER_OCID }}
+  TF_VAR_fingerprint: ${{ secrets.TF_VAR_FINGERPRINT }}
+  TF_VAR_private_key: ${{ secrets.TF_VAR_PRIVATE_KEY }}
+  TF_VAR_region: ${{ secrets.TF_VAR_REGION }}
+  TF_VAR_IMAGE_OCID: ${{ secrets.TF_VAR_IMAGE_OCID }}
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OCI SDK
+        run: pip install oci
+
+      - name: Probe LaunchInstance
+        run: |
+          python - <<'PY'
+          import os, json
+          import oci
+          from oci.exceptions import ServiceError
+
+          cfg = {
+              "user": os.environ["TF_VAR_user_ocid"],
+              "tenancy": os.environ["TF_VAR_tenancy_ocid"],
+              "region": os.environ["TF_VAR_region"],
+              "fingerprint": os.environ["TF_VAR_fingerprint"],
+              "key_content": os.environ["TF_VAR_private_key"],
+          }
+          comp = cfg["tenancy"]
+          identity = oci.identity.IdentityClient(cfg)
+          vn = oci.core.VirtualNetworkClient(cfg)
+          compute = oci.core.ComputeClient(cfg)
+
+          ads = identity.list_availability_domains(comp).data
+          print("Availability domains:")
+          for a in ads:
+              print("  ", a.name)
+
+          print("\nSubnets in tenancy root:")
+          subnets = vn.list_subnets(comp).data
+          for s in subnets:
+              print("  ", s.display_name, s.id, s.lifecycle_state)
+          target_subnet = next((s for s in subnets if s.lifecycle_state == "AVAILABLE"), None)
+
+          image = os.environ["TF_VAR_IMAGE_OCID"]
+          try:
+              img = compute.get_image(image).data
+              print(f"\nImage {image} OK:", img.display_name, "|", img.operating_system, img.operating_system_version)
+          except ServiceError as e:
+              print(f"\nImage lookup FAILED: {e.status} {e.message}")
+              image = None
+
+          if image and target_subnet:
+              launch = oci.core.models.LaunchInstanceDetails(
+                  availability_domain=ads[0].name,
+                  compartment_id=comp,
+                  display_name="jobspy-debug",
+                  shape="VM.Standard.E2.1.Micro",
+                  source_details=oci.core.models.InstanceSourceViaImageDetails(
+                      source_type="image", image_id=image, boot_volume_size_in_gbs=50),
+                  create_vnic_details=oci.core.models.CreateVnicDetails(
+                      subnet_id=target_subnet.id, assign_public_ip=True, display_name="jobspy-debug-vnic"),
+                  metadata={"ssh_authorized_keys": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICEE41CB+B80vHEOZvBRtXcJlsBX64GidN4WsgiquFue rohil@jobspy-lite"},
+              )
+              try:
+                  inst = compute.launch_instance(launch).data
+                  print("\nLAUNCH OK:", inst.id, inst.lifecycle_state)
+                  print("Terminating debug instance...")
+                  compute.terminate_instance(inst.id, wait_for_states=["TERMINATING"])
+                  print("Cleanup done.")
+              except ServiceError as e:
+                  print(f"\nLAUNCH FAILED: status={e.status} code={e.code}")
+                  print("message:", e.message)
+                  print("request-id:", e.request_id)
+          else:
+              print("\nSkipped launch (missing image or subnet).")
+          PY
