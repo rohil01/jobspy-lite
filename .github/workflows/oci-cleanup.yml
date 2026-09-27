@@ -43,14 +43,16 @@ jobs:
           vn = oci.core.VirtualNetworkClient(cfg)
           comp = cfg["tenancy"]
 
-          def retry(fn, desc, tries=12, delay=10):
+          def retry(fn, desc, tries=15, delay=15):
               for i in range(tries):
                   try:
-                      return fn()
-                  except oci.exceptions.ServiceError as e:
-                      if e.status == 404:
-                          return None
-                      print(f"  {desc}: {e.message} (attempt {i+1})")
+                      fn()
+                      return
+                  except Exception as e:
+                      msg = str(e)
+                      if "404" in msg or "not found" in msg.lower():
+                          return  # already gone
+                      print(f"  {desc}: {msg[:160]} (attempt {i+1}/{tries})")
                       time.sleep(delay)
               raise RuntimeError(f"{desc} kept failing")
 
@@ -72,6 +74,13 @@ jobs:
           for vcn in dupes:
               print(f"\nDeleting orphaned VCN {vcn.id} (created {vcn.time_created})")
 
+              # Dependency order: subnets first (they hold the RTs/SLs),
+              # then custom route tables/security lists, then IGWs, then VCN.
+              for sn in vn.list_subnets(comp, vcn_id=vcn.id).data:
+                  retry(lambda sn=sn: vn.delete_subnet(sn.id), f"delete subnet {sn.id}")
+              print("  subnets deleted")
+              time.sleep(20)  # let detachments settle
+
               for rt in vn.list_route_tables(comp, vcn_id=vcn.id).data:
                   if rt.display_name != "Default Route Table for " + vcn.display_name:
                       retry(lambda rt=rt: vn.delete_route_table(rt.id), f"delete route table {rt.id}")
@@ -85,10 +94,6 @@ jobs:
               for ig in vn.list_internet_gateways(comp, vcn_id=vcn.id).data:
                   retry(lambda ig=ig: vn.delete_internet_gateway(ig.id), f"delete IGW {ig.id}")
               print("  internet gateways deleted")
-
-              for sn in vn.list_subnets(comp, vcn_id=vcn.id).data:
-                  retry(lambda sn=sn: vn.delete_subnet(sn.id), f"delete subnet {sn.id}")
-              print("  subnets deleted")
 
               retry(lambda: vn.delete_vcn(vcn.id), "delete VCN")
               print(f"  VCN {vcn.id} deletion requested")
