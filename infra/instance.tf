@@ -18,7 +18,7 @@ data "oci_core_images" "ubuntu" {
 locals {
   # image_ocid is the reliable path (the images data source can return null
   # in some regions); falls back to the data source only when unset.
-  image_id = var.image_ocid != "" ? var.image_ocid : try(data.oci_core_images.ubuntu.images[0].id, null)
+  image_id = var.image_ocid != "" ? var.image_ocid : try(data.oci_core_images.ubuntu[0].images[0].id, null)
 }
 
 resource "oci_core_instance" "app" {
