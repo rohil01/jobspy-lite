@@ -57,6 +57,12 @@ def main() -> None:
     if args.serve:
         import uvicorn
 
+        # A restart/deploy orphans any in-flight run rows; close them now so
+        # the Runs view reflects reality immediately, not on the next trigger.
+        reaped = storage.reap_stale_runs()
+        if reaped:
+            print(f"Reaped {reaped} stale run row(s) left by the previous process.")
+
         # Start the cron scheduler if it was left enabled in settings.
         if scheduler.get_config().get("enabled"):
             scheduler.start()
