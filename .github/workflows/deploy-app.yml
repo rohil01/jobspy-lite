@@ -43,8 +43,13 @@ jobs:
       - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.OCI_SSH_KEY }}" > ~/.ssh/oci_key
+          printf '%s\n' "${{ secrets.OCI_SSH_KEY }}" | tr -d '\r' > ~/.ssh/oci_key
           chmod 600 ~/.ssh/oci_key
+          # Fail fast with a clear message instead of a cryptic publickey denial
+          if ! ssh-keygen -y -f ~/.ssh/oci_key >/dev/null 2>&1; then
+            echo "::error::OCI_SSH_KEY is not a valid private key — it must be the full PEM including the BEGIN/END lines (CRLF endings are fine, they get stripped)."
+            exit 1
+          fi
           ssh-keyscan -H "$OCI_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       # rsync the working tree (same excludes as deploy-oci.sh). .env lives on
