@@ -1,6 +1,9 @@
 # Secrets
 .env
 
+# Local server backups (contains .env)
+backup/
+
 # Data (DB, Excel export, resume)
 data/
 
