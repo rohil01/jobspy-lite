@@ -113,7 +113,9 @@ jobs:
           path: |
             ${{ env.TF_WORKDIR }}/.terraform
             ${{ env.TF_WORKDIR }}/terraform.tfstate
-          key: tfstate-${{ github.ref_name }}
+          key: tfstate-never-exact-match
+          restore-keys: |
+            tfstate-${{ github.ref_name }}-
 
       - uses: hashicorp/setup-terraform@v3
         with:
