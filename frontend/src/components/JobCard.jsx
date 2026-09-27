@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { formatIstDate } from '../datetime.js'
 import { ScoreGauge } from './ui.jsx'
 
 function salaryText(job) {
@@ -15,7 +16,9 @@ function requiredYearsText(job) {
   const { required_years_min, required_years_max } = job
   if (required_years_min == null && required_years_max == null) return null
   if (required_years_max == null) return `needs ${required_years_min}+ yrs`
-  if (required_years_min === required_years_max) return `needs ${required_years_min} yrs`
+  if (required_years_min === required_years_max) {
+    return `needs ${required_years_min} yr${required_years_min === 1 ? '' : 's'}`
+  }
   return `needs ${required_years_min}–${required_years_max} yrs`
 }
 
@@ -27,11 +30,19 @@ function verdictBadgeClass(verdict) {
   return 'badge'
 }
 
-function DetailValue({ value }) {
-  if (value == null || value === '') return <span>—</span>
-  if (Array.isArray(value)) return <span>{value.length ? value.join(', ') : '—'}</span>
-  if (typeof value === 'object') return <span>{JSON.stringify(value)}</span>
-  return <span>{String(value)}</span>
+function detailLabel(key) {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function detailValue(value) {
+  if (value == null || value === '') return '—'
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '—'
+  if (typeof value === 'object') return JSON.stringify(value)
+  if (typeof value === 'string' && /_at$/.test(value)) {
+    const asDate = new Date(value)
+    if (!Number.isNaN(asDate.getTime())) return formatIstDate(value)
+  }
+  return String(value)
 }
 
 function JobDetails({ job, onClose, onStatus }) {
@@ -43,9 +54,14 @@ function JobDetails({ job, onClose, onStatus }) {
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [onClose])
 
+  const aiKeys = new Set([
+    'score', 'verdict', 'required_years', 'experience_match',
+    'matched_skills', 'missing_skills', 'reasoning',
+  ])
   const entries = Object.entries(job).filter(
-    ([key]) => !['description', 'matched_skills', 'missing_skills'].includes(key),
+    ([key]) => key !== 'description' && !aiKeys.has(key),
   )
+  const hasAiDetails = Object.keys(job).some((key) => aiKeys.has(key))
 
   return (
     <div
@@ -55,41 +71,42 @@ function JobDetails({ job, onClose, onStatus }) {
         if (event.target === event.currentTarget) onClose()
       }}
     >
-      <section className="details-modal__window" role="dialog" aria-modal="true">
+      <section className="details-modal__window" role="dialog" aria-modal="true" aria-labelledby="job-details-title">
         <div className="details-modal__head">
           <div>
             <p className="eyebrow">Posting details</p>
-            <h2>{job.title || 'Untitled role'}</h2>
+            <h2 id="job-details-title">{job.title || 'Untitled role'}</h2>
             <p className="muted">{job.company || 'Unknown company'}{job.location ? ` · ${job.location}` : ''}</p>
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Close details">×</button>
+          <button className="icon-btn" type="button" onClick={onClose} aria-label="Close details">×</button>
         </div>
         <div className="details-modal__body">
-          <div className="details-ai">
-            <h3>AI assessment</h3>
-            <div className="details-ai__summary">
-              {job.score != null ? <strong className="details-ai__score">{job.score}<small>/100 fit</small></strong> : null}
-              {job.verdict ? <span className={verdictBadgeClass(job.verdict)}>{job.verdict}</span> : null}
-              {job.experience_match != null ? (
-                <span className={job.experience_match ? 'badge badge--ok' : 'badge badge--no'}>
-                  {job.experience_match ? 'matches experience' : 'outside window'}
-                </span>
+          {hasAiDetails ? (
+            <div className="details-ai">
+              <h3>AI assessment</h3>
+              <div className="details-ai__summary">
+                {job.score != null ? <strong className="details-ai__score">{job.score}<small>/100 fit</small></strong> : null}
+                {job.verdict && job.verdict !== 'unknown' ? (
+                  <span className={verdictBadgeClass(job.verdict)}>{job.verdict} fit</span>
+                ) : null}
+                {job.required_years_min != null || job.required_years_max != null ? (
+                  <span className="badge badge--accent">{requiredYearsText(job)}</span>
+                ) : null}
+                {job.experience_match != null ? (
+                  <span className={job.experience_match ? 'badge badge--ok' : 'badge badge--no'}>
+                    {job.experience_match ? '✓ matches experience' : '✕ outside experience window'}
+                  </span>
+                ) : null}
+              </div>
+              {Array.isArray(job.matched_skills) && job.matched_skills.length ? (
+                <div className="details-ai__skills"><b>Matched skills</b>{job.matched_skills.map((skill, index) => <span className="chip chip--ok" key={`matched-${index}`}>{skill}</span>)}</div>
               ) : null}
+              {Array.isArray(job.missing_skills) && job.missing_skills.length ? (
+                <div className="details-ai__skills"><b>Missing skills</b>{job.missing_skills.map((skill, index) => <span className="chip chip--miss" key={`missing-${index}`}>{skill}</span>)}</div>
+              ) : null}
+              {job.reasoning ? <p className="details-ai__reasoning">{job.reasoning}</p> : null}
             </div>
-            {job.matched_skills?.length ? (
-              <div className="details-ai__skills">
-                <b>Matched</b>
-                {job.matched_skills.map((s, i) => <span className="chip chip--ok" key={`m${i}`}>{s}</span>)}
-              </div>
-            ) : null}
-            {job.missing_skills?.length ? (
-              <div className="details-ai__skills">
-                <b>Missing</b>
-                {job.missing_skills.map((s, i) => <span className="chip chip--miss" key={`x${i}`}>{s}</span>)}
-              </div>
-            ) : null}
-            {job.reasoning ? <p className="details-ai__reasoning">{job.reasoning}</p> : null}
-          </div>
+          ) : null}
           {job.description ? (
             <div className="details-modal__description">
               <h3>Description</h3>
@@ -99,8 +116,8 @@ function JobDetails({ job, onClose, onStatus }) {
           <dl className="details-grid">
             {entries.map(([key, value]) => (
               <div className="details-grid__item" key={key}>
-                <dt>{key.replace(/_/g, ' ')}</dt>
-                <dd><DetailValue value={value} /></dd>
+                <dt>{detailLabel(key)}</dt>
+                <dd>{detailValue(value)}</dd>
               </div>
             ))}
           </dl>
@@ -111,7 +128,7 @@ function JobDetails({ job, onClose, onStatus }) {
               Open original ↗
             </a>
           ) : null}
-          <button className="btn" onClick={onClose}>Close</button>
+          <button className="btn" type="button" onClick={onClose}>Close</button>
         </div>
       </section>
     </div>
@@ -124,6 +141,7 @@ export default function JobCard({ job, onStatus, busy }) {
   const matched = job.matched_skills || []
   const missing = job.missing_skills || []
   const status = job.status || 'new'
+  const hasFit = typeof job.score === 'number' || job.verdict || job.reasoning
 
   function openFromTile(event) {
     if (event.target.closest('button, a, input, select, textarea')) return
@@ -161,6 +179,11 @@ export default function JobCard({ job, onStatus, busy }) {
       </div>
 
       <div className="badges">
+        {job.experience_match != null ? (
+          <span className={job.experience_match ? 'badge badge--ok' : 'badge badge--no'}>
+            {job.experience_match ? '✓ matches experience' : '✕ outside window'}
+          </span>
+        ) : null}
         {requiredYearsText(job) ? <span className="badge badge--accent">{requiredYearsText(job)}</span> : null}
         {job.site ? <span className="badge">{job.site}</span> : null}
         {job.job_type ? <span className="badge">{job.job_type}</span> : null}
@@ -170,29 +193,47 @@ export default function JobCard({ job, onStatus, busy }) {
         {job.notified ? <span className="badge badge--muted" title="Telegram alert sent">alerted</span> : null}
       </div>
 
-      <div className="fit">
-        <ScoreGauge score={typeof job.score === 'number' ? job.score : null} />
-        <div className="fit__body">
-          <div className="fit__verdict">
-            {job.verdict ? <span className={verdictBadgeClass(job.verdict)}>{job.verdict} fit</span> : null}
-            {matched.length || missing.length ? (
-              <span className="badge badge--muted">{matched.length}✓ · {missing.length}✕ skills</span>
-            ) : null}
-          </div>
-          {matched.length || missing.length ? (
-            <div className="chips">
-              {matched.slice(0, 8).map((s, i) => <span key={`m${i}`} className="chip chip--ok">✓ {s}</span>)}
-              {missing.slice(0, 8).map((s, i) => <span key={`x${i}`} className="chip chip--miss">✕ {s}</span>)}
+      {hasFit ? (
+        <div className="fit">
+          <ScoreGauge score={typeof job.score === 'number' ? job.score : null} />
+          <div className="fit__body">
+            <div className="fit__verdict">
+              {job.verdict && job.verdict !== 'unknown' ? (
+                <span className={verdictBadgeClass(job.verdict)}>{job.verdict} fit</span>
+              ) : null}
+              {matched.length || missing.length ? (
+                <span className="badge badge--muted">
+                  {matched.length}✓ · {missing.length}✕ skills
+                </span>
+              ) : null}
             </div>
-          ) : null}
-          {job.reasoning ? <p className="fit__why">{job.reasoning}</p> : null}
+            {matched.length || missing.length ? (
+              <div className="chips">
+                {matched.slice(0, 10).map((s, i) => (
+                  <span key={`m${i}`} className="chip chip--ok">✓ {s}</span>
+                ))}
+                {missing.slice(0, 10).map((s, i) => (
+                  <span key={`x${i}`} className="chip chip--miss">✕ {s}</span>
+                ))}
+              </div>
+            ) : null}
+            {job.reasoning ? <p className="fit__why">{job.reasoning}</p> : null}
+          </div>
         </div>
-      </div>
+      ) : null}
+
+      {job.description ? (
+        <div className="card__desc">
+          <div className="desc">{job.description}</div>
+        </div>
+      ) : null}
 
       <div className="card__foot">
-        <button className="link-btn" onClick={() => setDetailsJob(job)}>View details</button>
+        <button className="link-btn" type="button" onClick={() => setDetailsJob(job)}>
+          View details
+        </button>
         {job.first_seen_at ? (
-          <span className="card__id">seen {new Date(job.first_seen_at).toLocaleDateString()}</span>
+          <span className="card__id">seen {formatIstDate(job.first_seen_at)}</span>
         ) : null}
       </div>
 

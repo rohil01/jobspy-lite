@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { getRuns } from '../api.js'
+import { formatIst, secondsBetween } from '../datetime.js'
 import { ErrorBanner, Spinner } from './ui.jsx'
 
 export default function RunsView() {
@@ -44,7 +45,7 @@ export default function RunsView() {
           <tbody>
             {runs.map((run) => (
               <tr key={run.run_id} className={run.status === 'failed' ? 'runs-table__row--bad' : ''}>
-                <td>{new Date(run.started_at + (run.started_at.endsWith('Z') ? '' : 'Z')).toLocaleString()}</td>
+                <td>{formatIst(run.started_at)}</td>
                 <td><span className="badge">{run.trigger}</span></td>
                 <td>
                   <span className={`badge ${run.status === 'completed' ? 'badge--ok' : run.status === 'failed' ? 'badge--no' : ''}`}>
@@ -55,8 +56,8 @@ export default function RunsView() {
                 <td>{run.new_jobs ?? '—'}</td>
                 <td>{run.scored ?? '—'}</td>
                 <td>{run.alerts_sent ?? '—'}</td>
-                <td>{run.finished_at && run.started_at
-                  ? `${Math.max(0, Math.round((new Date(run.finished_at) - new Date(run.started_at)) / 1000))}s`
+                <td>{secondsBetween(run.started_at, run.finished_at)
+                  ? `${secondsBetween(run.started_at, run.finished_at)}s`
                   : '—'}</td>
                 <td className="runs-table__error">{run.error || ''}</td>
               </tr>

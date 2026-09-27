@@ -4,6 +4,7 @@ import {
   getStats, saveSchedulerConfig, saveSettings, startRun, testNotify,
   toggleScheduler, uploadResume,
 } from '../api.js'
+import { formatIst } from '../datetime.js'
 import { ErrorBanner, ProgressBar, Spinner } from './ui.jsx'
 
 function StatCard({ label, value, accent }) {
@@ -157,7 +158,7 @@ export default function Dashboard({ onGoJobs }) {
             <p className="small">
               <b>{resume.name}</b>
               {resume.chars ? ` · ${resume.chars.toLocaleString()} chars` : ''}
-              {resume.uploaded_at ? ` · uploaded ${new Date(resume.uploaded_at).toLocaleString()}` : ''}
+              {resume.uploaded_at ? ` · uploaded ${formatIst(resume.uploaded_at)}` : ''}
             </p>
           ) : (
             <p className="muted small">No resume stored yet — the pipeline needs one before it can score jobs.</p>
@@ -180,7 +181,7 @@ export default function Dashboard({ onGoJobs }) {
             <span className={`status-dot ${schedOn ? 'status-dot--on' : 'status-dot--off'}`} />
             <span>{schedOn ? 'running' : 'stopped'}</span>
             {sched?.next_run_at ? (
-              <span className="muted small">· next {new Date(sched.next_run_at).toLocaleString()}</span>
+              <span className="muted small">· next {formatIst(sched.next_run_at)}</span>
             ) : null}
           </div>
           {sched?.config ? (

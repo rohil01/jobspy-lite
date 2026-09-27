@@ -32,20 +32,23 @@ export function ErrorBanner({ error }) {
 export function ScoreGauge({ score }) {
   if (typeof score !== 'number') return <span className="gauge gauge--none">—</span>
   const tier = score >= 75 ? 'high' : score >= 50 ? 'mid' : 'low'
-  const r = 20
+  const r = 22
   const c = 2 * Math.PI * r
   const pct = Math.max(0, Math.min(100, score)) / 100
   return (
     <span className={`gauge gauge--${tier}`} role="img" aria-label={`fit score ${score} of 100`}>
-      <svg width="52" height="52" viewBox="0 0 52 52">
-        <circle className="gauge__track" cx="26" cy="26" r={r} fill="none" strokeWidth="5" />
+      <svg width="56" height="56" viewBox="0 0 56 56">
+        <circle className="gauge__track" cx="28" cy="28" r={r} fill="none" strokeWidth="5" />
         <circle
           className="gauge__fill"
-          cx="26" cy="26" r={r} fill="none" strokeWidth="5" strokeLinecap="round"
-          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} transform="rotate(-90 26 26)"
+          cx="28" cy="28" r={r} fill="none" strokeWidth="5" strokeLinecap="round"
+          strokeDasharray={c} strokeDashoffset={c * (1 - pct)} transform="rotate(-90 28 28)"
         />
       </svg>
-      <span className="gauge__num">{Math.round(score)}</span>
+      <span className="gauge__label">
+        <span className="gauge__num">{Math.round(score)}</span>
+        <span className="gauge__unit">FIT</span>
+      </span>
     </span>
   )
 }
