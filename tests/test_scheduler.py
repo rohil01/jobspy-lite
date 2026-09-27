@@ -58,6 +58,24 @@ def test_toggle_persists_enabled(clean_settings):
     assert scheduler.status()["running"] is False
 
 
+def test_hours_are_in_config_timezone_not_server_time(clean_settings):
+    """The 8-22 window must be evaluated in the CONFIG tz (Asia/Kolkata),
+    not the server's local zone — UTC evaluation let runs fire at night IST."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    cfg = {**scheduler.get_config(), "timezone": "Asia/Kolkata",
+           "interval_minutes": 110, "active_from": 8, "active_to": 22}
+    now_ist_hour = datetime.now(ZoneInfo("Asia/Kolkata")).hour
+    assert scheduler._hour_window_ok(cfg, now_ist_hour) == (8 <= now_ist_hour < 22)
+
+    # Interval ticks anchor to the window start in config tz.
+    trigger = scheduler._build_trigger(cfg)
+    nxt = trigger.get_next_fire_time(None, datetime.now(ZoneInfo("UTC")))
+    local_hour = nxt.astimezone(ZoneInfo("Asia/Kolkata")).hour
+    assert 8 <= local_hour < 22, f"next fire {nxt} outside 8-22 IST"
+
+
 def test_hour_window_gate(clean_settings):
     config = {"mode": "interval", "active_from": 8, "active_to": 22}
     assert scheduler._hour_window_ok(config, 9) is True

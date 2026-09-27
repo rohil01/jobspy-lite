@@ -13,8 +13,9 @@ a misfire grace period so a briefly-busy process still catches up.
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -30,6 +31,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "active_from": 8,            # hour-of-day window start
     "active_to": 22,             # hour-of-day window end
     "cron_expression": "0 */2 * * *",
+    "timezone": "Asia/Kolkata",  # all hours/cron fields are in THIS zone
     "enabled": False,
 }
 
@@ -55,6 +57,10 @@ def validate_config(config: Dict[str, Any]) -> Optional[str]:
     mode = config.get("mode")
     if mode not in ("interval", "cron"):
         return "mode must be 'interval' or 'cron'."
+    try:
+        ZoneInfo(str(config.get("timezone", "UTC")))
+    except Exception:
+        return "timezone must be a valid IANA name (e.g. Asia/Kolkata)."
     if mode == "interval":
         try:
             minutes = int(config.get("interval_minutes", 0))
@@ -99,14 +105,38 @@ def set_config(config: Dict[str, Any]) -> Dict[str, Any]:
 # --------------------------------------------------------------------------- #
 # Trigger construction
 # --------------------------------------------------------------------------- #
+def _tz(config: Dict[str, Any]) -> ZoneInfo:
+    """The configured display/schedule timezone (default Asia/Kolkata)."""
+    return ZoneInfo(str(config.get("timezone", "Asia/Kolkata")))
+
+
+def _next_window_start(config: Dict[str, Any]) -> datetime:
+    """Today's active_from in the config tz, or tomorrow if it already passed."""
+    tz = _tz(config)
+    start_hour = int(config.get("active_from", 0))
+    now = datetime.now(tz)
+    anchor = now.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+    if anchor <= now:
+        anchor += timedelta(days=1)
+    return anchor
+
+
 def _build_trigger(config: Dict[str, Any]):
-    """Build the APScheduler trigger for a validated config."""
+    """Build the APScheduler trigger for a validated config.
+
+    Interval ticks anchor to the window start (active_from in the config tz)
+    so fire times land at sane local times instead of 'whenever the scheduler
+    happened to start + k*interval'. Cron fields are interpreted in the
+    config tz as well.
+    """
     if config["mode"] == "interval":
         return IntervalTrigger(
             minutes=int(config["interval_minutes"]),
-            start_date=datetime.now(timezone.utc),
+            start_date=_next_window_start(config),
         )
-    return CronTrigger.from_crontab(str(config["cron_expression"]))
+    return CronTrigger.from_crontab(
+        str(config["cron_expression"]), timezone=_tz(config)
+    )
 
 
 def _hour_window_ok(config: Dict[str, Any], now_hour: int) -> bool:
@@ -127,7 +157,10 @@ def _run_job() -> None:
     """The scheduled callable: one pipeline run, guarded by the hour window."""
     global _last_result
     config = get_config()
-    now_hour = datetime.now().hour
+    # Window hours are in the CONFIG timezone (user-local), never the
+    # server's local zone (UTC on cloud VMs) — that mismatch let runs fire
+    # in the middle of the user's night.
+    now_hour = datetime.now(_tz(config)).hour
     if not _hour_window_ok(config, now_hour):
         logger.info("Scheduler tick skipped (outside %s:00-%s:00 active window).",
                     config.get("active_from"), config.get("active_to"))
@@ -146,6 +179,18 @@ def _get_scheduler() -> BackgroundScheduler:
         return _scheduler
 
 
+def _jobspec(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Common add_job kwargs (one source of truth for start/apply)."""
+    return {
+        "trigger": _build_trigger(config),
+        "id": SCHEDULER_JOB_ID,
+        "max_instances": 1,
+        "misfire_grace_time": 300,
+        "coalesce": True,
+        "replace_existing": True,
+    }
+
+
 def start() -> None:
     """Start the scheduler and (re)register the pipeline job from stored config."""
     scheduler = _get_scheduler()
@@ -153,15 +198,7 @@ def start() -> None:
     with _lock:
         if scheduler.get_job(SCHEDULER_JOB_ID) is not None:
             scheduler.remove_job(SCHEDULER_JOB_ID)
-        scheduler.add_job(
-            _run_job,
-            trigger=_build_trigger(config),
-            id=SCHEDULER_JOB_ID,
-            max_instances=1,
-            misfire_grace_time=300,
-            coalesce=True,
-            replace_existing=True,
-        )
+        scheduler.add_job(_run_job, **_jobspec(config))
         if not scheduler.running:
             scheduler.start()
     logger.info("Scheduler started with config: %s", config)
@@ -187,15 +224,7 @@ def apply_config(config: Dict[str, Any]) -> None:
         if scheduler.running:
             if scheduler.get_job(SCHEDULER_JOB_ID) is not None:
                 scheduler.remove_job(SCHEDULER_JOB_ID)
-            scheduler.add_job(
-                _run_job,
-                trigger=_build_trigger(config),
-                id=SCHEDULER_JOB_ID,
-                max_instances=1,
-                misfire_grace_time=300,
-                coalesce=True,
-                replace_existing=True,
-            )
+            scheduler.add_job(_run_job, **_jobspec(config))
 
 
 def toggle(enabled: bool) -> Dict[str, Any]:
