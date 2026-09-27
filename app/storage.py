@@ -389,25 +389,33 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
     )
 
 
-def reap_stale_runs(max_age_minutes: int = 30) -> int:
+def reap_stale_runs(max_age_minutes: Optional[int] = 30) -> int:
     """Close out runs stuck in 'running' with no heartbeat.
 
     Covers hard crashes and container restarts mid-run (deploys kill the
-    thread; the DB row used to stay 'running' forever). Returns rows closed.
+    thread; the DB row used to stay 'running' forever). Pass
+    ``max_age_minutes=None`` to reap ALL running rows — correct at process
+    startup, where a 'running' row is by definition orphaned (single
+    process, max_instances=1). Returns rows closed.
     """
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
-    ).isoformat()
+    where = "WHERE status = 'running'"
+    params: list = []
+    if max_age_minutes is not None:
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(minutes=max_age_minutes)
+        ).isoformat()
+        where += " AND started_at < ?"
+        params.append(cutoff)
     with transaction() as conn:
         cur = conn.execute(
-            """
+            f"""
             UPDATE runs
                SET status = 'failed',
                    finished_at = ?,
                    error = COALESCE(error, 'run interrupted (process restart/deploy)')
-             WHERE status = 'running' AND started_at < ?
+             {where}
             """,
-            (_utc_now(), cutoff),
+            [_utc_now(), *params],
         )
     return cur.rowcount
 

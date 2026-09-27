@@ -57,9 +57,11 @@ def main() -> None:
     if args.serve:
         import uvicorn
 
-        # A restart/deploy orphans any in-flight run rows; close them now so
-        # the Runs view reflects reality immediately, not on the next trigger.
-        reaped = storage.reap_stale_runs()
+        # A restart/deploy orphans any in-flight run rows; close them all now
+        # so the Runs view reflects reality immediately, not on the next
+        # trigger. (Single process + max_instances=1: nothing can legitimately
+        # still be running across a restart.)
+        reaped = storage.reap_stale_runs(max_age_minutes=None)
         if reaped:
             print(f"Reaped {reaped} stale run row(s) left by the previous process.")
 
