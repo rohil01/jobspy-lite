@@ -68,6 +68,14 @@ jobs:
           SSH="ssh -i ~/.ssh/oci_key -o IdentitiesOnly=yes"
           $SSH "$OCI_USER@$OCI_HOST" \
             'cd ~/app && nohup docker compose up --build -d > build.log 2>&1 & exit 0'
+          # First boot: docker compose may not exist yet — wait for the binary
+          # before assuming the build is running (fresh instances only).
+          for i in $(seq 1 40); do
+            if $SSH "$OCI_USER@$OCI_HOST" 'test -f ~/app/build.log' 2>/dev/null; then
+              break
+            fi
+            sleep 10
+          done
           for i in $(seq 1 40); do
             sleep 15
             if curl -sf -m 5 "http://$OCI_HOST:8000/health" > /dev/null; then

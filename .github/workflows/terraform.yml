@@ -26,6 +26,10 @@ permissions:
   contents: read
   pull-requests: write   # comment the plan on PRs
 
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   TF_WORKDIR: infra
   # Secrets were stored with UPPERCASE names; map them explicitly to the
@@ -46,6 +50,14 @@ jobs:
       plan_changed: ${{ steps.plan.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore terraform state
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.TF_WORKDIR }}/.terraform
+            ${{ env.TF_WORKDIR }}/terraform.tfstate
+          key: tfstate-${{ github.ref_name }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -92,6 +104,14 @@ jobs:
     environment: production   # gate with a required reviewer if you want
     steps:
       - uses: actions/checkout@v4
+
+      - name: Restore terraform state
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.TF_WORKDIR }}/.terraform
+            ${{ env.TF_WORKDIR }}/terraform.tfstate
+          key: tfstate-${{ github.ref_name }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
