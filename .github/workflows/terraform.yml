@@ -52,12 +52,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Restore terraform state
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ env.TF_WORKDIR }}/.terraform
             ${{ env.TF_WORKDIR }}/terraform.tfstate
-          key: tfstate-never-exact-match
+          key: tfstate-restore-plan-${{ github.run_id }}
           restore-keys: |
             tfstate-${{ github.ref_name }}-
 
@@ -113,7 +113,7 @@ jobs:
           path: |
             ${{ env.TF_WORKDIR }}/.terraform
             ${{ env.TF_WORKDIR }}/terraform.tfstate
-          key: tfstate-never-exact-match
+          key: tfstate-restore-apply-${{ github.run_id }}
           restore-keys: |
             tfstate-${{ github.ref_name }}-
 
