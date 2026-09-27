@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel
@@ -41,12 +42,16 @@ class AIClient:
         # max_retries=0: the SDK's internal retries bypass our rate limiter,
         # which let bursts exceed NVIDIA's cap (429s). Our parse() retry loop
         # owns all retrying, so every attempt is rate-limited.
+        # timeout: the SDK default is 10 MINUTES — a hung connection (NVIDIA
+        # accepts then never answers) stalled scoring threads that long before
+        # our retry loop could act. 90s covers slow generation, fails fast on
+        # dead connections. connect timeout kept tight at 15s.
         self._client = OpenAI(
             api_key=api_key or "not-used",
             base_url=base_url,
             max_retries=0,
+            timeout=httpx.Timeout(90.0, connect=15.0),
         )
-        
 
     def parse(
         self,
