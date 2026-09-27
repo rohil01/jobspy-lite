@@ -7,6 +7,7 @@ data "oci_identity_availability_domains" "ads" {
 }
 
 data "oci_core_images" "ubuntu" {
+  count            = var.image_ocid != "" ? 0 : 1
   compartment_id   = local.compartment_id
   operating_system = var.image_os
   shape            = var.instance_shape
@@ -15,9 +16,9 @@ data "oci_core_images" "ubuntu" {
 }
 
 locals {
-  # Latest Ubuntu image compatible with the shape; override with image_ocid
-  # to pin an exact build (e.g. ocid1.image.oc1.ap-hyderabad-1.aaaa…).
-  image_id = var.image_ocid != "" ? var.image_ocid : data.oci_core_images.ubuntu.images[0].id
+  # image_ocid is the reliable path (the images data source can return null
+  # in some regions); falls back to the data source only when unset.
+  image_id = var.image_ocid != "" ? var.image_ocid : try(data.oci_core_images.ubuntu.images[0].id, null)
 }
 
 resource "oci_core_instance" "app" {
@@ -39,6 +40,13 @@ resource "oci_core_instance" "app" {
     source_type             = "image"
     source_id               = local.image_id
     boot_volume_size_in_gbs = 50
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.image_id != null
+      error_message = "No image resolved: set the image_ocid variable (secret TF_VAR_IMAGE_OCID) to a valid Ubuntu image OCID."
+    }
   }
 
   create_vnic_details {
