@@ -53,7 +53,8 @@ resource "oci_core_instance" "app" {
     subnet_id        = oci_core_subnet.subnet.id
     assign_public_ip = true
     display_name     = "jobspy-lite-vnic"
-    hostname_label   = "jobspy-lite"
+    # No hostname_label: the subnet was created without a DNS label, and
+    # combining the two makes LaunchInstance fail with NotAuthorizedOrNotFound.
   }
 
   metadata = {
@@ -61,13 +62,8 @@ resource "oci_core_instance" "app" {
     user_data = base64encode(file("${path.module}/../deploy/cloud-init.yaml"))
   }
 
-  # E2.1.Micro cannot be stopped from inside the OS reliably; allow OCI to
-  # force-reboot it during maintenance. Harmless for the Flex shapes.
-  agent_config {
-    are_all_plugins_disabled = false
-    is_management_disabled   = false
-    is_monitoring_disabled   = false
-  }
+  # agent_config omitted: defaults are fine, and the explicit block was a
+  # suspect in the LaunchInstance 404 investigation.
 
   freeform_tags = {
     project = "jobspy-lite"
