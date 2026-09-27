@@ -27,15 +27,25 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      OCI_HOST_RAW: ${{ secrets.OCI_HOST }}
+      OCI_USER_RAW: ${{ secrets.OCI_SSH_USER }}
     steps:
       - uses: actions/checkout@v4
+
+      # Secrets pasted via the web UI often carry a trailing newline; trim
+      # everything so user@host:target never splits across lines.
+      - name: Resolve target
+        run: |
+          echo "OCI_HOST=$(printf '%s' "$OCI_HOST_RAW" | tr -d '[:space:]')" >> "$GITHUB_ENV"
+          echo "OCI_USER=$(printf '%s' "$OCI_USER_RAW" | tr -d '[:space:]')" >> "$GITHUB_ENV"
 
       - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.OCI_SSH_KEY }}" > ~/.ssh/oci_key
           chmod 600 ~/.ssh/oci_key
-          ssh-keyscan -H ${{ secrets.OCI_HOST }} >> ~/.ssh/known_hosts 2>/dev/null
+          ssh-keyscan -H "$OCI_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
       # rsync the working tree (same excludes as deploy-oci.sh). .env lives on
       # the server already — never ship secrets from CI.
@@ -45,20 +55,20 @@ jobs:
             --exclude .git --exclude .venv --exclude node_modules \
             --exclude frontend/dist --exclude data --exclude .env \
             --exclude __pycache__ --exclude .pytest_cache \
-            ./ ${{ secrets.OCI_SSH_USER }}@${{ secrets.OCI_HOST }}:~/app/
+            ./ "$OCI_USER@$OCI_HOST":~/app/
 
       - name: Build + restart (detached), then poll health
         run: |
-          ssh ${{ secrets.OCI_SSH_USER }}@${{ secrets.OCI_HOST }} \
+          ssh "$OCI_USER@$OCI_HOST" \
             'cd ~/app && nohup docker compose up --build -d > build.log 2>&1 & exit 0'
           for i in $(seq 1 40); do
             sleep 15
-            if curl -sf -m 5 "http://${{ secrets.OCI_HOST }}:8000/health" > /dev/null; then
+            if curl -sf -m 5 "http://$OCI_HOST:8000/health" > /dev/null; then
               echo "Healthy after ~$((i*15))s"
-              curl -s "http://${{ secrets.OCI_HOST }}:8000/health"
+              curl -s "http://$OCI_HOST:8000/health"
               exit 0
             fi
           done
           echo "::error::Health check failed after 10 minutes"
-          ssh ${{ secrets.OCI_SSH_USER }}@${{ secrets.OCI_HOST }} 'tail -40 ~/app/build.log'
+          ssh "$OCI_USER@$OCI_HOST" 'tail -40 ~/app/build.log'
           exit 1
