@@ -75,12 +75,17 @@ class AIJobAgent:
                 label=f"experience[{job.get('title', '?')} @{job.get('company', '?')}]",
             )
         except Exception:
+            # Propagate: the pipeline records the failure and retries the job
+            # later. Returning None here (the old behavior) made the window
+            # check classify EVERY job as outside-window, which an
+            # auto-reject rule would turn into a mass rejection on any
+            # transient AI outage.
             logger.exception(
                 "Experience estimation failed for job id=%s model=%s",
                 job.get("id"),
                 self.ai_model,
             )
-            return None
+            raise
         return {"min": data.min_years, "max": data.max_years}
 
     @staticmethod

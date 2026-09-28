@@ -326,14 +326,26 @@ def counts_by_status() -> Dict[str, int]:
     return counts
 
 
-def set_job_status(job_key_value: str, status: str) -> bool:
-    """Set a job's user status (new/accepted/rejected). Returns True if it exists."""
+def set_job_status(
+    job_key_value: str, status: str, *, only_if_status: Optional[str] = None
+) -> bool:
+    """Set a job's user status (new/accepted/rejected). Returns True if it exists.
+
+    Pass ``only_if_status`` for a compare-and-set update: the status changes
+    only when the stored status still equals that value (used by the
+    auto-reject rule so it never clobbers a user's accept/reject).
+    """
     if status not in ("new", "accepted", "rejected"):
         raise ValueError(f"Invalid status '{status}'.")
+    if only_if_status is not None and only_if_status not in ("new", "accepted", "rejected"):
+        raise ValueError(f"Invalid guard status '{only_if_status}'.")
     with transaction() as conn:
-        cursor = conn.execute(
-            "UPDATE jobs SET status = ? WHERE job_key = ?", (status, job_key_value)
-        )
+        sql = "UPDATE jobs SET status = ? WHERE job_key = ?"
+        params: list = [status, job_key_value]
+        if only_if_status is not None:
+            sql += " AND status = ?"
+            params.append(only_if_status)
+        cursor = conn.execute(sql, tuple(params))
         return cursor.rowcount > 0
 
 

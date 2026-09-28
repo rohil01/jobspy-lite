@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { formatIstDate } from '../datetime.js'
+import { renderMarkdown } from '../markdown.js'
 import { ScoreGauge } from './ui.jsx'
 
 function salaryText(job) {
@@ -110,7 +111,9 @@ function JobDetails({ job, onClose, onStatus }) {
           {job.description ? (
             <div className="details-modal__description">
               <h3>Description</h3>
-              <p>{job.description}</p>
+              {/* Scraped postings are markdown; render rich text like the
+                  original dashboard (input is HTML-escaped in markdown.js). */}
+              <div className="desc desc--rich" dangerouslySetInnerHTML={{ __html: renderMarkdown(job.description) }} />
             </div>
           ) : null}
           <dl className="details-grid">
@@ -234,7 +237,10 @@ export default function JobCard({ job, onStatus, busy }) {
 
       {job.description ? (
         <div className="card__desc">
-          <div className="desc">{job.description}</div>
+          <div
+            className="desc desc--rich"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(job.description) }}
+          />
         </div>
       ) : null}
 

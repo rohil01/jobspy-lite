@@ -2,6 +2,8 @@
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app import storage
 from app.pipeline import PipelineContext, _needs_scoring, run_pipeline
 
@@ -202,6 +204,152 @@ def test_run_pipeline_no_resume_fails_cleanly(temp_db):
     assert "resume" in summary["error"].lower()
     runs = storage.list_runs()
     assert runs[0]["status"] == "failed"
+
+
+class MismatchAgent:
+    """Agent 1 places the posting far above the window; Agent 2 must never run."""
+
+    def __init__(self):
+        self.suitability_calls = 0
+
+    def _estimate_required_years(self, job):
+        return {"min": 6, "max": 9}
+
+    def assess_suitability(self, job, resume_text):
+        self.suitability_calls += 1
+        raise AssertionError("suitability must not run for outside-window jobs")
+
+
+class SingleJobScraper:
+    def __init__(self, config):
+        pass
+
+    def scrape(self):
+        return [
+            {
+                "title": "Principal Engineer",
+                "company": "Acme",
+                "site": "linkedin",
+                "job_url": self.job_url,
+                "description": "Needs 6-9 years of experience.",
+            }
+        ]
+
+
+def _one_job_scraper(job_url):
+    return type(
+        "OneJobScraper",
+        (SingleJobScraper,),
+        {"job_url": job_url},
+    )
+
+
+def _set_window(min_years=0, max_years=2):
+    storage.set_setting("experience_min_years", min_years)
+    storage.set_setting("experience_max_years", max_years)
+
+
+def _fake_notify(monkeypatch):
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(
+        pipeline_module.notify, "notify_above_threshold", lambda *a, **k: 0
+    )
+
+
+def test_experience_mismatch_is_auto_rejected(temp_db, monkeypatch):
+    """A genuine experience-window mismatch is auto-rejected while its status
+    is still 'new' — it must never appear as an alert candidate again."""
+    _seed_context()
+    _set_window(0, 2)
+    _fake_notify(monkeypatch)
+
+    agent = MismatchAgent()
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", _one_job_scraper("https://example.com/senior"))
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: agent)
+
+    summary = run_pipeline(trigger="manual")
+
+    assert summary["status"] == "completed"
+    assert summary["auto_rejected"] == 1
+    job = storage.get_job("https://example.com/senior")
+    assert job["status"] == "rejected"
+    assert job["verdict"] == "outside experience window"
+    assert job["required_years_min"] == 6
+    assert agent.suitability_calls == 0  # no resume-fit call wasted on it
+
+
+def test_user_triaged_mismatch_is_not_clobbered(temp_db, monkeypatch):
+    """Auto-reject only applies to 'new' jobs: an accepted (or manually
+    rejected) posting keeps the user's decision even when it mismatches."""
+    _seed_context()
+    _set_window(0, 2)
+    _fake_notify(monkeypatch)
+
+    key = storage.upsert_job({"job_url": "https://example.com/senior", "title": "x"})
+    storage.set_job_status(key, "accepted")
+
+    agent = MismatchAgent()
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", _one_job_scraper("https://example.com/senior"))
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: agent)
+
+    summary = run_pipeline(trigger="manual")
+
+    assert summary["status"] == "completed"
+    assert summary["auto_rejected"] == 0
+    job = storage.get_job(key)
+    assert job["status"] == "accepted"
+    assert job["verdict"] == "outside experience window"  # still annotated
+
+
+def test_estimate_failure_is_never_auto_rejected(temp_db, monkeypatch):
+    """An AI outage must leave the job unscored (retried next run), NOT
+    rejected as outside-window — rejection only follows a real estimate."""
+    _seed_context()
+    _fake_notify(monkeypatch)
+
+    class DownAgent:
+        def _estimate_required_years(self, job):
+            raise RuntimeError("NVIDIA down")
+
+        def assess_suitability(self, job, resume_text):
+            raise AssertionError("not reached")
+
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", _one_job_scraper("https://example.com/down"))
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: DownAgent())
+
+    summary = run_pipeline(trigger="manual")
+
+    assert summary["status"] == "completed"
+    assert summary["auto_rejected"] == 0
+    job = storage.get_job("https://example.com/down")
+    assert job["status"] == "new"
+    assert "NVIDIA down" in (job["score_error"] or "")
+    assert job["verdict"] is None
+
+
+def test_agent_estimate_failure_propagates(temp_db, monkeypatch):
+    """AIJobAgent._estimate_required_years must re-raise: returning None used
+    to make the window check classify every job as outside-window, which the
+    auto-reject rule would turn into a mass rejection during any outage."""
+    from app.agent.ai_job_agent import AIJobAgent
+
+    agent = AIJobAgent(config={"ai_model": "test-model", "api_key": "unused"})
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("NVIDIA down")
+
+    monkeypatch.setattr(agent.client, "parse", boom)
+    with pytest.raises(RuntimeError):
+        agent._estimate_required_years(
+            {"title": "T", "company": "C", "description": "d"}
+        )
 
 
 def test_run_pipeline_end_to_end_with_fakes(temp_db, monkeypatch):

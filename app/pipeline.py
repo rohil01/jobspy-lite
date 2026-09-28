@@ -8,7 +8,9 @@ Sequence (each run, cron or manual):
        predates the current resume (resume changed since scoring), or rows
        last scored more than RESCORE_AFTER_HOURS ago, or ``force_rescore``.
   4. Persist annotations (required years, experience match, score, skills);
-     user status/notified are preserved by storage.upsert_job.
+     user status/notified are preserved by storage.upsert_job. Jobs whose
+     required experience is outside the window are auto-rejected (status
+     ``rejected``) unless the user already triaged them.
   5. Export the jobs table to Excel and send Telegram alerts for
      above-threshold matches.
   6. Record everything on a ``runs`` row.
@@ -146,6 +148,9 @@ def _screen_one(
         annotated["matched_skills"] = []
         annotated["missing_skills"] = []
         annotated["reasoning"] = "Required experience is outside the selected window."
+        # Flag for the scoring loop's auto-reject rule. Set ONLY in this
+        # genuine-mismatch branch — never when the estimate itself failed.
+        annotated["auto_rejected"] = True
     annotated["scored_with_resume"] = context.resume_hash or None
     return annotated
 
@@ -202,6 +207,7 @@ def run_pipeline(
             "jobs_scraped": 0,
             "new_jobs": 0,
             "scored": 0,
+            "auto_rejected": 0,
             "alerts_sent": 0,
             "duration_s": 0.0,
             "error": "Another pipeline run is already in progress.",
@@ -235,6 +241,7 @@ def _execute_pipeline(
         "jobs_scraped": 0,
         "new_jobs": 0,
         "scored": 0,
+        "auto_rejected": 0,
         "alerts_sent": 0,
         "duration_s": None,
         "error": None,
@@ -285,6 +292,7 @@ def _execute_pipeline(
         _report(f"{len(to_score)} postings need scoring…", 25)
         scored_count = 0
         failed_count = 0
+        auto_rejected = 0
         if to_score:
             agent = AIJobAgent(context.config)
             max_workers = min(
@@ -310,6 +318,20 @@ def _execute_pipeline(
                         storage.record_score_failure(key, repr(exc))
                         continue
                     storage.upsert_job(annotated, job_key_value=key)
+                    # Auto-reject genuine experience mismatches. only_if
+                    # status='new' keeps the user in charge: an accepted or
+                    # manually rejected posting is never re-classified, and a
+                    # mismatch the user accepted stays accepted.
+                    if annotated.get("auto_rejected") and storage.set_job_status(
+                        key, "rejected", only_if_status="new"
+                    ):
+                        auto_rejected += 1
+                        logger.info(
+                            "Auto-rejected %s — required experience %s is "
+                            "outside the window.",
+                            key,
+                            annotated.get("required_years"),
+                        )
                     if annotated.get("score") is not None or annotated.get("verdict"):
                         storage.clear_score_failure(key)
                     scored_count += 1
@@ -336,6 +358,7 @@ def _execute_pipeline(
             jobs_scraped=len(scraped),
             new_jobs=new_count,
             scored=scored_count,
+            auto_rejected=auto_rejected,
             alerts_sent=alerts,
         )
         storage.finish_run(
