@@ -131,16 +131,14 @@ class AIJobAgent:
                 label=f"fit[{job.get('title', '?')} @{job.get('company', '?')}]",
             )
         except Exception:
+            # Propagate: the pipeline records the failure and retries the job
+            # later. Returning the fake "unknown" verdict here (the old
+            # behavior) persisted the job as scored — so it was never
+            # retried, and the real failure was invisible in the UI.
             logger.exception(
                 "Suitability parsing failed for job id=%s model=%s",
                 job.get("id"),
                 self.ai_model,
             )
-            return {
-                "score": None,
-                "verdict": "unknown",
-                "matched_skills": [],
-                "missing_skills": [],
-                "reasoning": "Could not parse the AI response.",
-            }
+            raise
         return data.model_dump()

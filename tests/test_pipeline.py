@@ -59,6 +59,18 @@ def test_needs_scoring_rules(temp_db):
     unscored = {"score": None, "required_years_min": None, "scored_at": None}
     assert _needs_scoring(unscored, context) is True
 
+    # Poisoned by the old fake-verdict bug: verdict 'unknown' but no score —
+    # must re-score instead of waiting out the rescore window.
+    poisoned = {
+        "score": None,
+        "required_years_min": 1,
+        "verdict": "unknown",
+        "scored_with_resume": "hash1",
+        "scored_at": datetime.now(timezone.utc).isoformat(),
+    }
+    assert _needs_scoring(poisoned, context) is True
+    assert _needs_scoring(dict(poisoned, verdict="weak"), context) is False  # genuine low score stays
+
 
 def test_needs_scoring_disabled_rescore_window(temp_db, monkeypatch):
     """RESCORE_AFTER_HOURS=0 means: never re-score stale jobs (a new resume
@@ -350,6 +362,53 @@ def test_agent_estimate_failure_propagates(temp_db, monkeypatch):
         agent._estimate_required_years(
             {"title": "T", "company": "C", "description": "d"}
         )
+
+
+def test_agent_suitability_failure_propagates(temp_db, monkeypatch):
+    """AIJobAgent.assess_suitability must re-raise: returning the fake
+    'unknown' verdict used to persist the job as scored, so it was never
+    retried and the real failure stayed invisible."""
+    from app.agent.ai_job_agent import AIJobAgent
+
+    agent = AIJobAgent(config={"ai_model": "test-model", "api_key": "unused"})
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("NVIDIA down")
+
+    monkeypatch.setattr(agent.client, "parse", boom)
+    with pytest.raises(RuntimeError):
+        agent.assess_suitability(
+            {"title": "T", "company": "C", "description": "d"}, "resume text"
+        )
+
+
+def test_suitability_failure_is_recorded_and_retried(temp_db, monkeypatch):
+    """A suitability-agent outage must leave the job unscored (retried next
+    run), NOT persisted with a fake 'unknown' verdict that sticks for 72h."""
+    _seed_context()
+    _fake_notify(monkeypatch)
+
+    class DownFitAgent:
+        def _estimate_required_years(self, job):
+            return {"min": 1, "max": 2}  # in-window so the fit agent runs
+
+        def assess_suitability(self, job, resume_text):
+            raise RuntimeError("NVIDIA down")
+
+    import app.pipeline as pipeline_module
+
+    monkeypatch.setattr(pipeline_module, "JobScraper", _one_job_scraper("https://example.com/fitfail"))
+    monkeypatch.setattr(pipeline_module, "AIJobAgent", lambda config: DownFitAgent())
+
+    summary = run_pipeline(trigger="manual")
+
+    assert summary["status"] == "completed"
+    assert summary["auto_rejected"] == 0
+    job = storage.get_job("https://example.com/fitfail")
+    assert job["status"] == "new"
+    assert "NVIDIA down" in (job["score_error"] or "")
+    assert job["verdict"] is None and job["score"] is None
+    assert job["score_attempts"] == 1
 
 
 def test_run_pipeline_end_to_end_with_fakes(temp_db, monkeypatch):

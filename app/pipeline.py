@@ -176,6 +176,12 @@ def _needs_scoring(row: Optional[Dict[str, Any]], context: PipelineContext) -> b
         return False
     if row.get("score") is None and row.get("required_years_min") is None:
         return True
+    # Self-heal rows poisoned by the old bug that persisted a fake
+    # "unknown" verdict when the suitability agent failed: they look scored
+    # but have no score, so re-run them instead of waiting out the 72h
+    # rescore window.
+    if row.get("score") is None and (row.get("verdict") or "").lower() == "unknown":
+        return True
     if context.resume_hash and row.get("scored_with_resume") != context.resume_hash:
         return True
     scored_at = row.get("scored_at")
