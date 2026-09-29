@@ -49,3 +49,29 @@ export function secondsBetween(start, end) {
   if (!a || !b) return null
   return Math.max(0, Math.round((b - a) / 1000))
 }
+
+/** Today's date (YYYY-MM-DD) in IST. */
+export function istTodayYmd(now = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now)
+}
+
+/** [start, end) Date pair covering today's IST calendar day, in UTC terms. */
+export function istDayRange(now = new Date()) {
+  const ymd = istTodayYmd(now)
+  const start = new Date(`${ymd}T00:00:00+05:30`)
+  const end = new Date(start.getTime() + 24 * 60 * 60 * 1000)
+  return { start, end, ymd }
+}
+
+/** True when an API timestamp falls inside today's IST calendar day. */
+export function isSameIstDay(value, now = new Date()) {
+  if (!value) return false
+  const date = parseWhen(value)
+  if (!date) return false
+  return istTodayYmd(date) === istTodayYmd(now)
+}

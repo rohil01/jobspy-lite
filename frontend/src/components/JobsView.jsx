@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getJobs, setJobStatus } from '../api.js'
+import { isSameIstDay } from '../datetime.js'
 import JobCard from './JobCard.jsx'
 import { ErrorBanner, Spinner } from './ui.jsx'
 
@@ -69,6 +70,12 @@ export default function JobsView() {
     let list = jobs
     if (filter === 'ai-failed') {
       list = list.filter((j) => j.score_error && (j.score_attempts || 0) > 0)
+    } else if (filter === 'new') {
+      // "New" = first seen today (IST calendar day), not merely unreviewed —
+      // a backlog of old 'new' rows otherwise drowns the day's harvest.
+      list = list.filter(
+        (j) => (j.status || 'new') === 'new' && isSameIstDay(j.first_seen_at),
+      )
     } else if (filter !== 'all') {
       list = list.filter((j) => (j.status || 'new') === filter)
     }

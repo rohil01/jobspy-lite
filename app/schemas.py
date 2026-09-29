@@ -54,6 +54,7 @@ class SchedulerStatus(BaseModel):
 
 class SettingsIn(BaseModel):
     scrape_params: Optional[Dict[str, Any]] = None
+    agent_params: Optional[Dict[str, Any]] = None
     experience_min_years: Optional[int] = None
     experience_max_years: Optional[int] = None
     score_threshold: Optional[int] = None

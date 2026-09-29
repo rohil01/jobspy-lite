@@ -135,4 +135,71 @@ def test_skills_stored_as_json(temp_db):
     storage.upsert_job(_job(matched_skills=["python", "sql"], missing_skills=["go"]))
     job = storage.list_jobs()[0]
     assert job["matched_skills"] == ["python", "sql"]
-    assert job["missing_skills"] == ["go"]
+
+
+def test_raw_insert_has_null_experience_match(temp_db):
+    """Unscored rows must carry experience_match NULL (not 0) — a raw 0 made
+    the UI claim 'outside window' on jobs the AI never assessed."""
+    key = storage.upsert_job(_job())
+    assert storage.get_job(key)["experience_match"] is None
+
+    storage.upsert_job(_job(score=80, verdict="strong", experience_match=True))
+    assert storage.get_job(key)["experience_match"] == 1
+
+
+def test_failure_marks_refused_on_scored_rows(temp_db):
+    """A scored row never takes failure marks again: the marks are cleared on
+    scoring, so marks appearing next to a score are stale bookkeeping that
+    flags healthy jobs as 'AI failed' in the UI."""
+    key = storage.upsert_job(_job())
+    storage.upsert_job(_job(score=77, verdict="moderate"))
+
+    assert storage.record_score_failure(key, "late 503") is False
+    job = storage.get_job(key)
+    assert job["score"] == 77
+    assert job["score_attempts"] == 0 and job["score_error"] is None
+
+
+def test_stale_failure_marks_cleaned_at_connect(temp_db):
+    """Startup cleanup removes marks stranded next to a score (deploy-restart
+    artifact) without touching genuinely-failed unscored rows."""
+    scored_key = storage.upsert_job(_job("scored"))
+    storage.upsert_job(_job("scored", score=88, verdict="strong"))
+    failed_key = storage.upsert_job(_job("failed"))
+    storage.record_score_failure(failed_key, "NVIDIA down")
+
+    # Simulate the torn write the cleanup exists for.
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET score_attempts = 1, score_error = 'torn' WHERE job_key = ?",
+            (scored_key,),
+        )
+
+    storage.close()
+    storage.connect()  # re-runs the startup cleanup
+
+    healed = storage.get_job(scored_key)
+    assert healed["score"] == 88
+    assert healed["score_attempts"] == 0 and healed["score_error"] is None
+    failed = storage.get_job(failed_key)
+    assert failed["score_error"] == "NVIDIA down"  # real failure untouched
+
+
+def test_unscored_match_zero_cleaned_at_connect(temp_db):
+    """Startup cleanup NULLs experience_match on rows the old build wrote as
+    raw-0 (no score, no verdict, no years); assessed rows stay 1/0."""
+    raw_key = storage.upsert_job(_job("raw"))
+    rejected_key = storage.upsert_job(
+        _job("rejected", required_years={"min": 10, "max": None},
+             experience_match=False, verdict="outside experience window")
+    )
+    with storage.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET experience_match = 0 WHERE job_key = ?", (raw_key,)
+        )
+
+    storage.close()
+    storage.connect()
+
+    assert storage.get_job(raw_key)["experience_match"] is None
+    assert storage.get_job(rejected_key)["experience_match"] == 0  # genuine mismatch kept

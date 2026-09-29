@@ -104,6 +104,8 @@ def connect() -> sqlite3.Connection:
             _conn.execute("PRAGMA foreign_keys=ON")
             _conn.executescript(_SCHEMA)
             _migrate()
+            _conn.execute(_STALE_FAILURE_SQL)
+            _conn.execute(_UNSCORED_MATCH_SQL)
             _conn.commit()
         return _conn
 
@@ -151,6 +153,18 @@ def _json_or_none(value: Any) -> Optional[str]:
     return json.dumps(make_json_safe(value), ensure_ascii=False)
 
 
+def _experience_match_value(annotated: Dict[str, Any]) -> Optional[int]:
+    """experience_match column: 1/0 once AI has assessed the posting, NULL
+    before that. Storing 0 on raw (unscored) inserts made the UI show
+    'outside window' on jobs that were never screened."""
+    match = annotated.get("experience_match")
+    if match is not None:
+        return 1 if match else 0
+    if annotated.get("required_years") is not None:
+        return 0
+    return None
+
+
 def _job_row_values(job_key_value: str, annotated: Dict[str, Any], now: str,
                     existing: Optional[Dict[str, Any]]) -> tuple:
     """Build the column tuple for an upsert of one annotated job."""
@@ -180,7 +194,7 @@ def _job_row_values(job_key_value: str, annotated: Dict[str, Any], now: str,
         annotated.get("interval"),
         required_min,
         required_max,
-        1 if annotated.get("experience_match") else 0,
+        _experience_match_value(annotated),
         score,
         annotated.get("verdict"),
         _json_or_none(annotated.get("matched_skills")),
@@ -434,19 +448,47 @@ def reap_stale_runs(max_age_minutes: Optional[int] = 30) -> int:
 
 MAX_SCORE_ATTEMPTS = 3
 
+# A scored row must never wear failure bookkeeping: it clears its marks on
+# every successful scoring, so marks surviving next to a score can only come
+# from a failure recorded AFTER the score (a torn multi-step write during a
+# deploy restart). They make the UI show 'AI failed' on healthy jobs, so any
+# leftover marks on scored rows are removed at startup.
+_STALE_FAILURE_SQL = """
+UPDATE jobs
+   SET score_attempts = 0, score_error = NULL
+ WHERE score IS NOT NULL AND (score_attempts > 0 OR score_error IS NOT NULL)
+"""
+
+# Older builds wrote experience_match=0 on RAW (unscored) inserts, which the
+# UI renders as 'outside window' on jobs the AI never assessed. Rows with no
+# score, no verdict, and no estimated years are exactly those raw rows.
+_UNSCORED_MATCH_SQL = """
+UPDATE jobs
+   SET experience_match = NULL
+ WHERE experience_match = 0
+   AND score IS NULL AND verdict IS NULL
+   AND required_years_min IS NULL AND required_years_max IS NULL
+"""
+
 
 def record_score_failure(job_key: str, error: str) -> None:
-    """Bump the attempt counter and store the last error for one job."""
+    """Bump the attempt counter and store the last error for one job.
+
+    Rows that already carry a real score are refused: their marks were
+    cleared on scoring, so new marks would be stale bookkeeping — the job
+    would sit flagged 'AI failed' in the UI until the 72h rescore despite
+    having a perfectly good score."""
     with transaction() as conn:
-        conn.execute(
+        cursor = conn.execute(
             """
             UPDATE jobs
                SET score_attempts = score_attempts + 1,
                    score_error = ?
-             WHERE job_key = ?
+             WHERE job_key = ? AND score IS NULL
             """,
             (error[:500], job_key),
         )
+        return cursor.rowcount > 0
 
 
 def clear_score_failure(job_key: str) -> None:

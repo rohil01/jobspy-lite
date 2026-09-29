@@ -52,8 +52,13 @@ class RateLimiter:
                 self._cv.wait(timeout=max(wait_for, 0.01))
 
 
+# Default rpm before any config (env or dashboard) is applied; kept as a
+# named constant so configure_rate_limit can tell "untouched" from "already
+# overridden at runtime".
+DEFAULT_RATE_LIMIT = 20
+
 # Singleton instance — import this everywhere, never construct a new one.
 # Default 30 rpm gives headroom under NVIDIA's 40 rpm cap even if other
 # processes or a burst share the same key. AI_RATE_LIMIT_PER_MIN overrides it
 # (ai_client.configure_rate_limit applies the env value at client setup).
-NVIDIA_RATE_LIMITER = RateLimiter(max_calls=20, period=60.0)
+NVIDIA_RATE_LIMITER = RateLimiter(max_calls=DEFAULT_RATE_LIMIT, period=60.0)

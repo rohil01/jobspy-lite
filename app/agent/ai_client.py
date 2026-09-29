@@ -37,7 +37,10 @@ class AIClient:
         config = config or {}
         self.ai_model = config.get("ai_model", "")
         api_key = config.get("api_key") or os.environ.get("NVIDIA_API_KEY")
-        base_url = config.get("ai_base_url", "https://integrate.api.nvidia.com/v1")
+        base_url = config.get(
+            "ai_base_url",
+            os.environ.get("AI_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+        )
 
         # max_retries=0: the SDK's internal retries bypass our rate limiter,
         # which let bursts exceed NVIDIA's cap (429s). Our parse() retry loop

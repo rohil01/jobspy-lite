@@ -126,6 +126,51 @@ def test_settings_roundtrip(client):
     assert body["experience_max_years"] == 3
 
 
+def test_agent_params_roundtrip_and_sanitization(client):
+    updated = client.post(
+        "/settings",
+        json={"agent_params": {
+            "ai_model": "mymodel/v2",
+            "ai_base_url": "https://example.invalid/v1",
+            "ai_rate_limit_per_min": 15,
+            "max_workers": 6,
+            "api_key": "should-not-persist",
+        }},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["agent_params"]["ai_model"] == "mymodel/v2"
+    assert body["agent_params"]["ai_base_url"] == "https://example.invalid/v1"
+    assert body["agent_params"]["ai_rate_limit_per_min"] == 15
+    assert body["max_workers"] == 6
+    assert "api_key" not in body["agent_params"]
+
+    from app import storage
+    assert "api_key" not in (storage.get_setting("agent_params") or {})
+
+    # Empty model is dropped (falls back to env default); junk rate limit -> 30.
+    fallback = client.post(
+        "/settings",
+        json={"agent_params": {"ai_model": "  ", "ai_rate_limit_per_min": "bogus"}},
+    )
+    assert fallback.status_code == 200
+    params = fallback.json()["agent_params"]
+    assert params["ai_model"] != "  "
+    assert params["ai_rate_limit_per_min"] == 30
+
+
+def test_scrape_params_roundtrip(client):
+    updated = client.post(
+        "/settings",
+        json={"scrape_params": {"search_terms": ["ML Engineer"], "hours_old": 6, "location": "Remote"}},
+    )
+    assert updated.status_code == 200
+    params = updated.json()["scrape_params"]
+    assert params["search_terms"] == ["ML Engineer"]
+    assert params["hours_old"] == 6
+    assert params["location"] == "Remote"
+
+
 def test_export_xlsx(client):
     from app import storage
 

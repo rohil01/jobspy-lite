@@ -205,6 +205,161 @@ export default function Dashboard({ onGoJobs }) {
         </div>
 
         <div className="panel">
+          <h3 className="panel__title">Scrape params</h3>
+          {settings?.scrape_params ? (
+            <>
+              <label className="inline">
+                search terms (comma-sep)
+                <input
+                  className="input" type="text"
+                  defaultValue={(settings.scrape_params.search_terms || []).join(', ')}
+                  onBlur={(e) => {
+                    const terms = e.target.value.split(',').map((t) => t.trim()).filter(Boolean)
+                    const current = (settings.scrape_params.search_terms || []).join(', ')
+                    if (terms.join(', ') !== current) {
+                      onSaveSettings({ scrape_params: { ...settings.scrape_params, search_terms: terms } })
+                    }
+                  }}
+                />
+              </label>
+              <label className="inline">
+                location
+                <input
+                  className="input" type="text"
+                  defaultValue={settings.scrape_params.location ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim()
+                    if (v !== (settings.scrape_params.location ?? '')) {
+                      onSaveSettings({ scrape_params: { ...settings.scrape_params, location: v } })
+                    }
+                  }}
+                />
+              </label>
+              <div className="toolbar">
+                <label className="inline">
+                  results
+                  <input
+                    className="input input--num" type="number" min="1"
+                    defaultValue={settings.scrape_params.results_wanted ?? 600}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.scrape_params.results_wanted) {
+                        onSaveSettings({ scrape_params: { ...settings.scrape_params, results_wanted: v } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="inline">
+                  hours old
+                  <input
+                    className="input input--num" type="number" min="1"
+                    defaultValue={settings.scrape_params.hours_old ?? 3}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.scrape_params.hours_old) {
+                        onSaveSettings({ scrape_params: { ...settings.scrape_params, hours_old: v } })
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="toolbar">
+                <label className="inline">
+                  sites
+                  <input
+                    className="input input--num" type="text"
+                    defaultValue={(settings.scrape_params.sites || []).join(', ')}
+                    onBlur={(e) => {
+                      const sites = e.target.value.split(',').map((s) => s.trim()).filter(Boolean)
+                      if (sites.join(', ') !== (settings.scrape_params.sites || []).join(', ')) {
+                        onSaveSettings({ scrape_params: { ...settings.scrape_params, sites } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="inline">
+                  <input
+                    type="checkbox"
+                    defaultChecked={!!settings.scrape_params.linkedin_fetch_description}
+                    onChange={(e) => onSaveSettings({ scrape_params: { ...settings.scrape_params, linkedin_fetch_description: e.target.checked } })}
+                  />
+                  full descriptions
+                </label>
+              </div>
+              <p className="muted small">Changes apply from the next run.</p>
+            </>
+          ) : (
+            <Spinner label="Loading settings…" />
+          )}
+        </div>
+
+        <div className="panel">
+          <h3 className="panel__title">AI agent</h3>
+          {settings?.agent_params ? (
+            <>
+              <label className="inline">
+                model
+                <input
+                  className="input" type="text"
+                  defaultValue={settings.agent_params.ai_model ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim()
+                    if (v && v !== settings.agent_params.ai_model) {
+                      onSaveSettings({ agent_params: { ...settings.agent_params, ai_model: v } })
+                    }
+                  }}
+                />
+              </label>
+              <label className="inline">
+                base URL
+                <input
+                  className="input" type="text"
+                  placeholder={settings.agent_params.ai_base_url || 'https://integrate.api.nvidia.com/v1'}
+                  defaultValue={settings.agent_params.ai_base_url ?? ''}
+                  onBlur={(e) => {
+                    const v = e.target.value.trim()
+                    if (v !== (settings.agent_params.ai_base_url ?? '')) {
+                      onSaveSettings({ agent_params: { ...settings.agent_params, ai_base_url: v } })
+                    }
+                  }}
+                />
+              </label>
+              <div className="toolbar">
+                <label className="inline">
+                  rate limit / min
+                  <input
+                    className="input input--num" type="number" min="0"
+                    defaultValue={settings.agent_params.ai_rate_limit_per_min ?? 30}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.agent_params.ai_rate_limit_per_min) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, ai_rate_limit_per_min: v } })
+                      }
+                    }}
+                  />
+                </label>
+                <label className="inline">
+                  workers
+                  <input
+                    className="input input--num" type="number" min="1" max="16"
+                    defaultValue={settings.max_workers ?? 4}
+                    onBlur={(e) => {
+                      const v = parseInt(e.target.value, 10)
+                      if (!Number.isNaN(v) && v !== settings.max_workers) {
+                        onSaveSettings({ agent_params: { ...settings.agent_params, max_workers: v } })
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <p className="muted small">Model/URL apply from the next run; rate limit and workers apply live. API keys stay in the server .env.</p>
+            </>
+          ) : (
+            <Spinner label="Loading settings…" />
+          )}
+        </div>
+
+        <div className="panel">
           <h3 className="panel__title">Screening</h3>
           {settings ? (
             <>

@@ -274,15 +274,16 @@ def scheduler_toggle(enabled: bool) -> SchedulerStatus:
 # --------------------------------------------------------------------------- #
 @app.get("/settings")
 def get_settings() -> Dict[str, Any]:
-    from .config import scrape_defaults
+    from .config import agent_defaults, scrape_defaults
 
     context = PipelineContext()
     return {
         "scrape_params": {**scrape_defaults(), **(storage.get_setting("scrape_params") or {})},
+        "agent_params": {**agent_defaults(), **(storage.get_setting("agent_params") or {})},
         "experience_min_years": context.experience_min,
         "experience_max_years": context.experience_max,
         "score_threshold": context.score_threshold,
-        "max_workers": context.config.get("max_workers", 4),
+        "max_workers": context.max_workers,
     }
 
 
@@ -290,6 +291,21 @@ def get_settings() -> Dict[str, Any]:
 def update_settings(settings: SettingsIn) -> Dict[str, Any]:
     if settings.scrape_params is not None:
         storage.set_setting("scrape_params", settings.scrape_params)
+    if settings.agent_params is not None:
+        params = dict(settings.agent_params)
+        # API keys are env/server-only, never dashboard-editable.
+        params.pop("api_key", None)
+        model = str(params.get("ai_model") or "").strip()
+        if not model:
+            params.pop("ai_model", None)
+        base_url = str(params.get("ai_base_url") or "").strip()
+        params["ai_base_url"] = base_url  # empty string = fall back to env default
+        rate = params.get("ai_rate_limit_per_min")
+        try:
+            params["ai_rate_limit_per_min"] = max(0, int(rate)) if rate is not None else 30
+        except (TypeError, ValueError):
+            params["ai_rate_limit_per_min"] = 30
+        storage.set_setting("agent_params", params)
     if settings.experience_min_years is not None:
         storage.set_setting("experience_min_years", settings.experience_min_years)
     if settings.experience_max_years is not None:

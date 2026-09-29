@@ -71,9 +71,12 @@ class PipelineContext:
 
         self.config = load_config()
         self.settings = storage.all_settings()
-        # Scrape params: stored settings override config.py/env defaults.
+        # Scrape + agent params: stored settings override config.py/env
+        # defaults (the dashboard edits them via POST /settings).
         stored_scrape = self.settings.get("scrape_params") or {}
+        stored_agent = self.settings.get("agent_params") or {}
         self.scrape_params: Dict[str, Any] = {**self.config, **stored_scrape}
+        self.config = {**self.config, **stored_agent}
         self.experience_min: int = self.settings.get(
             "experience_min_years", self.config["experience_min_years"]
         )
@@ -86,6 +89,9 @@ class PipelineContext:
         self.score_threshold: int = self.settings.get(
             "score_threshold", self.config.get("score_threshold", 70)
         )
+        # Runtime-editable AI knobs (dashboard → AI agent panel).
+        self.ai_rate_limit_per_min: int = self.config.get("ai_rate_limit_per_min", 30)
+        self.max_workers: int = self.config.get("max_workers", 4)
         self.force_rescore: bool = bool(self.settings.get("force_rescore", False))
         resume = self.settings.get("resume") or {}
         self.resume_text: str = resume.get("text", "")
@@ -301,8 +307,18 @@ def _execute_pipeline(
         auto_rejected = 0
         if to_score:
             agent = AIJobAgent(context.config)
+            from .agent.rate_limiter import NVIDIA_RATE_LIMITER
+
+            if (
+                context.ai_rate_limit_per_min > 0
+                and NVIDIA_RATE_LIMITER.max_calls != context.ai_rate_limit_per_min
+            ):
+                NVIDIA_RATE_LIMITER.max_calls = context.ai_rate_limit_per_min
+                logger.info(
+                    "AI rate limit set to %d calls/minute", context.ai_rate_limit_per_min
+                )
             max_workers = min(
-                context.config.get("max_workers", 4) or 4, max(1, len(to_score))
+                context.max_workers or 4, max(1, len(to_score))
             )
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {

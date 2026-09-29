@@ -114,6 +114,15 @@ AI_RATE_LIMIT_PER_MIN: int = _env_int("AI_RATE_LIMIT_PER_MIN", 30)
 MAX_WORKERS: int = _env_int("MAX_WORKERS", 4)
 
 
+def agent_defaults() -> Dict[str, Any]:
+    """The AI agent parameter subset, as stored/served for the settings UI."""
+    return {
+        "ai_model": AI_MODEL,
+        "ai_base_url": AI_BASE_URL,
+        "ai_rate_limit_per_min": AI_RATE_LIMIT_PER_MIN,
+    }
+
+
 def scrape_defaults() -> Dict[str, Any]:
     """The scrape parameter subset, as stored/served for the settings UI."""
     return {
@@ -134,15 +143,13 @@ def load_config() -> Dict[str, Any]:
     return {
         # scraper
         **scrape_defaults(),
+        **agent_defaults(),
         "proxies": list(PROXIES),
         # experience filter
         "experience_min_years": EXPERIENCE_MIN_YEARS,
         "experience_max_years": EXPERIENCE_MAX_YEARS,
         # ai
         "ai_provider": AI_PROVIDER,
-        "ai_model": AI_MODEL,
-        "ai_base_url": AI_BASE_URL,
-        "ai_rate_limit_per_min": AI_RATE_LIMIT_PER_MIN,
         # pipeline
         "max_workers": MAX_WORKERS,
     }

@@ -19,14 +19,22 @@ logger = logging.getLogger(__name__)
 
 def configure_rate_limit() -> None:
     """Apply AI_RATE_LIMIT_PER_MIN to the shared limiter, at most once.
-    Called lazily (env may be loaded after import time via .env)."""
+
+    Only applies while the limiter still sits at its module default: the
+    pipeline overrides the limit at runtime from dashboard settings
+    (agent_params.ai_rate_limit_per_min), and re-applying the env value on
+    every AIJobAgent() init would clobber that override."""
     global _RATE_LIMIT_CONFIGURED
     if _RATE_LIMIT_CONFIGURED:
         return
     _RATE_LIMIT_CONFIGURED = True
     try:
         from ..config import AI_RATE_LIMIT_PER_MIN
-        if AI_RATE_LIMIT_PER_MIN > 0 and AI_RATE_LIMIT_PER_MIN != NVIDIA_RATE_LIMITER.max_calls:
+        from .rate_limiter import DEFAULT_RATE_LIMIT
+        if (
+            AI_RATE_LIMIT_PER_MIN > 0
+            and NVIDIA_RATE_LIMITER.max_calls == DEFAULT_RATE_LIMIT
+        ):
             NVIDIA_RATE_LIMITER.max_calls = AI_RATE_LIMIT_PER_MIN
             logger.info("AI rate limit set to %d calls/minute", AI_RATE_LIMIT_PER_MIN)
     except Exception:  # noqa: BLE001 - config is optional in tests/tools
