@@ -207,6 +207,33 @@ def test_keeps_highest_score_and_leaves_scoring_resume(client):
     assert listed[0]["id"] == body["id"]
 
 
+def test_run_without_edits_still_offers_the_resume(client, monkeypatch):
+    from app.agent.resume_io import extract_text
+    from app import storage
+
+    monkeypatch.setattr(
+        _Scripted,
+        "parse",
+        lambda self, messages, text_format, temperature=0.0, label="ai-call": (
+            _ats(50) if text_format is AtsScore
+            else EditPlan(targets=[]) if text_format is EditPlan
+            else text_format(patches=[])
+        ),
+    )
+    _upload(client)
+    key = storage.upsert_job(
+        {"job_url": "https://x/none", "title": "Role", "company": "Acme", "description": "Lua work."}
+    )
+    response = client.post(f"/jobs/{key}/resume-rewrite", json={"max_tries": 1})
+    body = _finished(client, key, response.json()["id"])
+    assert body["status"] == "done"
+    assert body["winning_patches"] == []
+    assert body["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/{body['id']}/docx")
+    assert download.status_code == 200
+    assert extract_text(download.content) == extract_text(_docx_bytes())
+
+
 def test_failed_tries_do_not_write_a_file(client):
     from app import storage
 

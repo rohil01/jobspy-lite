@@ -75,7 +75,14 @@ export default function RewritePanel({ job, startToken = 0 }) {
           Download résumé
         </a>
       ) : (
-        <button className="btn btn--small" type="button" disabled title="Available when the rewrite finishes">
+        <button
+          className="btn btn--small"
+          type="button"
+          disabled
+          title={running || !attempt
+            ? 'Available when the rewrite finishes'
+            : attempt.error || 'No résumé file for this attempt. Use Rerun rewrite.'}
+        >
           Download résumé
         </button>
       )}

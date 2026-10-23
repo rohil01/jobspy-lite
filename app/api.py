@@ -381,14 +381,15 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
             )
             docx_path = None
             applied_rows: list = []
-            if original and result.get("patch_chain") and result.get("winning_total") is not None:
-                patched, applied_rows = enforce_one_page(original, result["patch_chain"])
-                if any(row.get("applied") for row in applied_rows):
-                    folder = DB_PATH.parent / "rewrites"
-                    folder.mkdir(parents=True, exist_ok=True)
-                    path = folder / _rewrite_docx_name((job or {}).get("company") or "")
-                    path.write_bytes(patched)
-                    docx_path = str(path)
+            if original and result.get("winning_total") is not None:
+                patched = original
+                if result.get("patch_chain"):
+                    patched, applied_rows = enforce_one_page(original, result["patch_chain"])
+                folder = DB_PATH.parent / "rewrites"
+                folder.mkdir(parents=True, exist_ok=True)
+                path = folder / _rewrite_docx_name((job or {}).get("company") or "")
+                path.write_bytes(patched)
+                docx_path = str(path)
             winning = _stamp_rewrite(result, applied_rows)
             failed = bool(result.get("error"))
             status = "error" if failed else "done"
