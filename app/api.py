@@ -372,17 +372,76 @@ def _save_rewrite_docx(
     return str(path), applied_rows
 
 
+def _flatten_patches(patch_chain: Optional[list] = None, winning_patches: Optional[list] = None) -> list:
+    patches: list = []
+    if patch_chain:
+        for group in patch_chain:
+            for patch in group or []:
+                if patch:
+                    patches.append(patch)
+    elif winning_patches:
+        patches = [patch for patch in winning_patches if patch]
+    return patches
+
+
+def _apply_text_patches(text: str, patches: Optional[list] = None) -> str:
+    current = text or ""
+    for patch in patches or []:
+        original = str((patch or {}).get("original") or "")
+        replacement = str((patch or {}).get("replacement") or "")
+        if original and original in current:
+            current = current.replace(original, replacement, 1)
+    return current
+
+
+def _docx_from_text(text: str) -> bytes:
+    from io import BytesIO
+
+    from docx import Document
+
+    document = Document()
+    lines = (text or "").split("\n")
+    if not lines:
+        document.add_paragraph("")
+    else:
+        for line in lines:
+            document.add_paragraph(line)
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _write_available_docx(
+    job: Optional[Dict[str, Any]],
+    patch_chain: Optional[list] = None,
+    winning_patches: Optional[list] = None,
+) -> tuple:
+    """Prefer the uploaded Word file; otherwise build one from stored resume text."""
+    original = load_resume_docx()
+    if original:
+        return _save_rewrite_docx(job, original, patch_chain)
+    resume = storage.get_setting("resume") or {}
+    text = resume.get("text") or ""
+    if not text.strip():
+        return None, []
+    patched = _apply_text_patches(text, _flatten_patches(patch_chain, winning_patches))
+    path = _rewrite_dir() / _rewrite_docx_name((job or {}).get("company") or "")
+    path.write_bytes(_docx_from_text(patched))
+    return str(path), []
+
+
 def _ensure_rewrite_docx(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Fill in a finished rewrite that never got a file, if resume.docx exists."""
+    """Fill in a finished rewrite that never got a file."""
     if row is None or row.get("status") == "running":
         return row
     if _resolve_rewrite_path(row.get("docx_path")):
         return row
-    original = load_resume_docx()
-    if not original:
-        return row
     job = storage.get_job(row.get("job_key") or "") or {}
-    path, _applied = _save_rewrite_docx(job, original, row.get("patch_chain"))
+    path, _applied = _write_available_docx(
+        job, row.get("patch_chain"), row.get("winning_patches")
+    )
+    if not path:
+        return row
     return storage.update_resume_rewrite(row["id"], {"docx_path": path}) or {
         **row,
         "docx_path": path,
@@ -440,13 +499,10 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
                 company_type=payload.company_type or "",
                 resume_docx=original,
             )
-            docx_path = None
-            applied_rows: list = []
-            if original:
-                docx_path, applied_rows = _save_rewrite_docx(
-                    job, original, result.get("patch_chain")
-                )
-            winning = _stamp_rewrite(result, applied_rows)
+            docx_path, applied_rows = _write_available_docx(
+                job, result.get("patch_chain")
+            )
+            winning = _stamp_rewrite(result, applied_rows or [])
             failed = bool(result.get("error"))
             status = "error" if failed else "done"
             storage.update_resume_rewrite(
@@ -475,10 +531,9 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
     except Exception as exc:  # noqa: BLE001 - the row must leave the running state
         logger.exception("Resume rewrite failed for %s", job_key)
         patch = {"status": "error", "error": str(exc)}
-        original = load_resume_docx()
-        if original:
-            failed_job = storage.get_job(job_key) or {}
-            path, _applied = _save_rewrite_docx(failed_job, original)
+        failed_job = storage.get_job(job_key) or {}
+        path, _applied = _write_available_docx(failed_job)
+        if path:
             patch["docx_path"] = path
         storage.update_resume_rewrite(rewrite_id, patch)
 

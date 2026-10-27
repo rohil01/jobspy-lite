@@ -290,6 +290,69 @@ def test_done_row_without_path_is_backfilled(client):
     assert extract_text(download.content) == extract_text(_docx_bytes())
 
 
+def test_done_row_without_docx_uses_resume_text(client):
+    from app.agent.resume_io import extract_text, resume_docx_path
+    from app import storage
+
+    storage.set_setting(
+        "resume",
+        {"text": "Jane Doe\nBuilt APIs in Python.", "hash": "abc", "name": "resume.txt"},
+    )
+    assert not resume_docx_path().is_file()
+    key = storage.upsert_job(
+        {"job_url": "https://x/text-only", "title": "Role", "company": "Acme", "description": "A real description."}
+    )
+    storage.insert_resume_rewrite(
+        {
+            "id": "text-only-patches",
+            "job_key": key,
+            "status": "done",
+            "docx_path": None,
+            "winning_patches": [
+                {"original": "Built APIs in Python.", "replacement": "Built APIs in Python and Kubernetes."},
+            ],
+            "patch_chain": [
+                [{"original": "Built APIs in Python.", "replacement": "Built APIs in Python and Kubernetes."}],
+            ],
+        }
+    )
+    listed = client.get(f"/jobs/{key}/resume-rewrites").json()["rewrites"]
+    assert listed[0]["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/text-only-patches/docx")
+    assert download.status_code == 200
+    patched = extract_text(download.content)
+    assert "Kubernetes" in patched
+    assert "Jane Doe" in patched
+
+
+def test_rewrite_without_original_docx_still_downloads(client):
+    from app.agent.resume_io import extract_text, resume_docx_path
+    from app import storage
+
+    storage.set_setting(
+        "resume",
+        {"text": "Jane Doe\nBuilt APIs in Python.", "hash": "abc", "name": "resume.txt"},
+    )
+    assert not resume_docx_path().is_file()
+    key = storage.upsert_job(
+        {
+            "job_url": "https://x/no-docx",
+            "title": "Backend Engineer",
+            "company": "Acme",
+            "description": "Python Python services for backend systems.",
+        }
+    )
+    response = client.post(f"/jobs/{key}/resume-rewrite", json={"max_tries": 1})
+    body = _finished(client, key, response.json()["id"])
+    assert body["status"] == "done"
+    assert body["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/{body['id']}/docx")
+    assert download.status_code == 200
+    patched = extract_text(download.content)
+    assert "Jane Doe" in patched
+    assert "Kubernetes" in patched or "Built APIs in Python" in patched
+
+
 def test_download_finds_file_when_stored_path_is_from_docker(client):
     from app.agent.resume_io import extract_text
     from app.config import DB_PATH
