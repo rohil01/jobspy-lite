@@ -45,6 +45,22 @@ def _docx_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _column_docx_bytes() -> bytes:
+    """Three-column table layout, like the real résumé."""
+    document = Document()
+    table = document.add_table(rows=1, cols=3)
+    table.cell(0, 0).text = "Jane Doe\nBuilt APIs in Python."
+    table.cell(0, 1).text = "Client work"
+    table.cell(0, 2).text = "Education"
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _table_count(data: bytes) -> int:
+    return len(Document(BytesIO(data)).tables)
+
+
 class _Scripted:
     """Seven-step script. The second try scores lower and proposes a bad metric."""
 
@@ -288,6 +304,49 @@ def test_done_row_without_path_is_backfilled(client):
     download = client.get(f"/jobs/{key}/resume-rewrites/old-null-path/docx")
     assert download.status_code == 200
     assert extract_text(download.content) == extract_text(_docx_bytes())
+
+
+def test_uploaded_docx_replaces_plaintext_fallback(client):
+    from app.agent.resume_io import extract_text
+    from app.config import DB_PATH
+    from app import storage
+
+    client.post(
+        "/resume",
+        files={
+            "resume": (
+                "resume.docx",
+                _column_docx_bytes(),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        },
+    )
+    key = storage.upsert_job(
+        {"job_url": "https://x/layout", "title": "Role", "company": "Acme", "description": "A real description."}
+    )
+    folder = DB_PATH.parent / "rewrites"
+    folder.mkdir(parents=True, exist_ok=True)
+    stale = folder / "Rohil_Chaturvedi_Acme.docx"
+    stale.write_bytes(_docx_bytes())
+    assert _table_count(stale.read_bytes()) == 0
+    storage.insert_resume_rewrite(
+        {
+            "id": "stale-plain",
+            "job_key": key,
+            "status": "done",
+            "docx_path": str(stale),
+            "patch_chain": [
+                [{"original": "Built APIs in Python.", "replacement": "Built APIs in Python and Kubernetes."}],
+            ],
+        }
+    )
+    listed = client.get(f"/jobs/{key}/resume-rewrites").json()["rewrites"]
+    assert listed[0]["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/stale-plain/docx")
+    assert download.status_code == 200
+    assert _table_count(download.content) == 1
+    assert "Kubernetes" in extract_text(download.content)
+    assert "Education" in extract_text(download.content)
 
 
 def test_done_row_without_docx_uses_resume_text(client):

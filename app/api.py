@@ -431,12 +431,24 @@ def _write_available_docx(
 
 
 def _ensure_rewrite_docx(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Fill in a finished rewrite that never got a file."""
+    """Fill in a finished rewrite that never got a file.
+
+    When the uploaded Word résumé exists, always rebuild from it so a earlier
+    plain-text fallback cannot replace the original layout.
+    """
     if row is None or row.get("status") == "running":
         return row
+    original = load_resume_docx()
+    job = storage.get_job(row.get("job_key") or "") or {}
+    if original:
+        path, _applied = _save_rewrite_docx(job, original, row.get("patch_chain"))
+        return storage.update_resume_rewrite(row["id"], {"docx_path": path}) or {
+            **row,
+            "docx_path": path,
+            "docx_ready": True,
+        }
     if _resolve_rewrite_path(row.get("docx_path")):
         return row
-    job = storage.get_job(row.get("job_key") or "") or {}
     path, _applied = _write_available_docx(
         job, row.get("patch_chain"), row.get("winning_patches")
     )
