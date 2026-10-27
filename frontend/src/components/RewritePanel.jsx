@@ -7,25 +7,35 @@ function rewriteFileName(company) {
   return `Rohil_Chaturvedi_${cleaned || 'Company'}.docx`
 }
 
+function newestReady(rewrites) {
+  return (rewrites || []).find((row) => row?.docx_ready) || null
+}
+
 export default function RewritePanel({ job, startToken = 0 }) {
   const [attempt, setAttempt] = useState(null)
+  const [download, setDownload] = useState(null)
   const [error, setError] = useState('')
   const [open, setOpen] = useState(false)
   const changesRef = useRef(null)
   const running = attempt?.status === 'running'
 
+  function applyList(rewrites) {
+    const rows = rewrites || []
+    setAttempt(rows[0] || null)
+    setDownload(newestReady(rows))
+  }
+
   async function refresh() {
     const body = await listRewrites(job.job_key)
-    const latest = (body.rewrites || [])[0] || null
-    setAttempt(latest)
-    return latest
+    applyList(body.rewrites)
+    return (body.rewrites || [])[0] || null
   }
 
   useEffect(() => {
     let cancelled = false
     listRewrites(job.job_key)
       .then((body) => {
-        if (!cancelled) setAttempt((body.rewrites || [])[0] || null)
+        if (!cancelled) applyList(body.rewrites)
       })
       .catch((err) => {
         if (!cancelled) setError(err.message || 'Could not load the rewrite')
@@ -51,17 +61,18 @@ export default function RewritePanel({ job, startToken = 0 }) {
 
   async function run() {
     setError('')
-    setAttempt((current) => ({ ...(current || {}), status: 'running', docx_ready: false, winning_patches: [] }))
+    setAttempt((current) => ({ ...(current || {}), status: 'running', winning_patches: [] }))
     try {
       const created = await startRewrite(job.job_key, {})
       setAttempt(created)
+      if (created?.docx_ready) setDownload(created)
     } catch (err) {
       setError(err.message || 'Rewrite failed')
       refresh().catch(() => {})
     }
   }
 
-  const ready = Boolean(attempt?.docx_ready)
+  const ready = Boolean(download?.docx_ready)
   const patches = attempt?.winning_patches || []
 
   return (
@@ -69,7 +80,7 @@ export default function RewritePanel({ job, startToken = 0 }) {
       {ready ? (
         <a
           className="btn btn--small"
-          href={rewriteDocxUrl(job.job_key, attempt.id)}
+          href={rewriteDocxUrl(job.job_key, download.id)}
           download={rewriteFileName(job.company)}
         >
           Download résumé
@@ -81,7 +92,7 @@ export default function RewritePanel({ job, startToken = 0 }) {
           disabled
           title={running || !attempt
             ? 'Available when the rewrite finishes'
-            : attempt.error || 'No résumé file for this attempt. Use Rerun rewrite.'}
+            : attempt.error || 'Re-upload the résumé .docx, then use Rerun rewrite.'}
         >
           Download résumé
         </button>

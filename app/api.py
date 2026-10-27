@@ -328,11 +328,72 @@ def _rewrite_lock(job_key: str) -> threading.Lock:
         return lock
 
 
+def _rewrite_docx_name(company: str) -> str:
+    """Rohil_Chaturvedi_Infosys.docx from the job's company."""
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", (company or "").strip()).strip("_")
+    return f"Rohil_Chaturvedi_{cleaned or 'Company'}.docx"
+
+
+def _rewrite_dir() -> Path:
+    from .config import DB_PATH
+
+    folder = DB_PATH.parent / "rewrites"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def _resolve_rewrite_path(stored: Optional[str]) -> Optional[Path]:
+    """Find a rewrite file by absolute path or by basename under data/rewrites."""
+    if not stored:
+        return None
+    path = Path(stored)
+    if path.is_file():
+        return path
+    local = _rewrite_dir() / path.name
+    if local.is_file():
+        return local
+    return None
+
+
+def _save_rewrite_docx(
+    job: Optional[Dict[str, Any]],
+    original: bytes,
+    patch_chain: Optional[list] = None,
+) -> tuple:
+    """Write the patched résumé, or a copy of the original when nothing applied."""
+    from .agent.resume_io import enforce_one_page
+
+    applied_rows: list = []
+    patched = original
+    if patch_chain:
+        patched, applied_rows = enforce_one_page(original, patch_chain)
+    path = _rewrite_dir() / _rewrite_docx_name((job or {}).get("company") or "")
+    path.write_bytes(patched)
+    return str(path), applied_rows
+
+
+def _ensure_rewrite_docx(row: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Fill in a finished rewrite that never got a file, if resume.docx exists."""
+    if row is None or row.get("status") == "running":
+        return row
+    if _resolve_rewrite_path(row.get("docx_path")):
+        return row
+    original = load_resume_docx()
+    if not original:
+        return row
+    job = storage.get_job(row.get("job_key") or "") or {}
+    path, _applied = _save_rewrite_docx(job, original, row.get("patch_chain"))
+    return storage.update_resume_rewrite(row["id"], {"docx_path": path}) or {
+        **row,
+        "docx_path": path,
+        "docx_ready": True,
+    }
+
+
 def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
     """Run the loop and fill the row that was inserted as ``running``."""
-    from .agent.resume_io import enforce_one_page
     from .agent.resume_rewrite import make_client, run_loop
-    from .config import DB_PATH, agent_defaults
+    from .config import agent_defaults
 
     try:
         job = storage.get_job(job_key)
@@ -381,15 +442,10 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
             )
             docx_path = None
             applied_rows: list = []
-            if original and result.get("winning_total") is not None:
-                patched = original
-                if result.get("patch_chain"):
-                    patched, applied_rows = enforce_one_page(original, result["patch_chain"])
-                folder = DB_PATH.parent / "rewrites"
-                folder.mkdir(parents=True, exist_ok=True)
-                path = folder / _rewrite_docx_name((job or {}).get("company") or "")
-                path.write_bytes(patched)
-                docx_path = str(path)
+            if original:
+                docx_path, applied_rows = _save_rewrite_docx(
+                    job, original, result.get("patch_chain")
+                )
             winning = _stamp_rewrite(result, applied_rows)
             failed = bool(result.get("error"))
             status = "error" if failed else "done"
@@ -418,10 +474,13 @@ def _finish_rewrite(rewrite_id: str, job_key: str, payload: RewriteIn) -> None:
             )
     except Exception as exc:  # noqa: BLE001 - the row must leave the running state
         logger.exception("Resume rewrite failed for %s", job_key)
-        storage.update_resume_rewrite(
-            rewrite_id,
-            {"status": "error", "error": str(exc)},
-        )
+        patch = {"status": "error", "error": str(exc)}
+        original = load_resume_docx()
+        if original:
+            failed_job = storage.get_job(job_key) or {}
+            path, _applied = _save_rewrite_docx(failed_job, original)
+            patch["docx_path"] = path
+        storage.update_resume_rewrite(rewrite_id, patch)
 
 
 @app.post("/jobs/{job_key:path}/resume-rewrite", status_code=202)
@@ -490,23 +549,22 @@ def rewrite_resume(job_key: str, payload: RewriteIn) -> Dict[str, Any]:
 def list_resume_rewrites_endpoint(job_key: str) -> Dict[str, Any]:
     if storage.get_job(job_key) is None:
         raise HTTPException(status_code=404, detail=f"Unknown job '{job_key}'.")
-    return {"rewrites": storage.list_resume_rewrites(job_key)}
-
-
-def _rewrite_docx_name(company: str) -> str:
-    """Rohil_Chaturvedi_Infosys.docx from the job's company."""
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", (company or "").strip()).strip("_")
-    return f"Rohil_Chaturvedi_{cleaned or 'Company'}.docx"
+    return {
+        "rewrites": [
+            _ensure_rewrite_docx(row) for row in storage.list_resume_rewrites(job_key)
+        ]
+    }
 
 
 @app.get("/jobs/{job_key:path}/resume-rewrites/{rewrite_id}/docx")
 def download_rewritten_resume(job_key: str, rewrite_id: str) -> FileResponse:
     row = storage.get_resume_rewrite(rewrite_id)
-    if row is None or row.get("job_key") != job_key or not row.get("docx_path"):
+    if row is None or row.get("job_key") != job_key:
         raise HTTPException(status_code=404, detail="No patched resume for this attempt.")
-    path = Path(row["docx_path"])
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Patched resume file is missing.")
+    row = _ensure_rewrite_docx(row)
+    path = _resolve_rewrite_path((row or {}).get("docx_path"))
+    if path is None:
+        raise HTTPException(status_code=404, detail="No patched resume for this attempt.")
     job = storage.get_job(job_key) or {}
     return FileResponse(
         path,

@@ -234,7 +234,8 @@ def test_run_without_edits_still_offers_the_resume(client, monkeypatch):
     assert extract_text(download.content) == extract_text(_docx_bytes())
 
 
-def test_failed_tries_do_not_write_a_file(client):
+def test_failed_tries_still_offer_the_resume(client):
+    from app.agent.resume_io import extract_text
     from app import storage
 
     class _Boom:
@@ -250,15 +251,115 @@ def test_failed_tries_do_not_write_a_file(client):
     rewrite_module.AIClient = _Boom
     _upload(client)
     key = storage.upsert_job(
-        {"job_url": "https://x/fail", "title": "Role", "description": "A real description."}
+        {"job_url": "https://x/fail", "title": "Role", "company": "Acme", "description": "A real description."}
     )
     response = client.post(f"/jobs/{key}/resume-rewrite", json={"max_tries": 3})
     assert response.status_code == 202
     body = _finished(client, key, response.json()["id"])
     assert body["error"]
-    assert body["docx_ready"] is False
+    assert body["docx_ready"] is True
     assert body["winning_patches"] == []
     assert len(body["trace"]) == 2
+    download = client.get(f"/jobs/{key}/resume-rewrites/{body['id']}/docx")
+    assert download.status_code == 200
+    assert extract_text(download.content) == extract_text(_docx_bytes())
+
+
+def test_done_row_without_path_is_backfilled(client):
+    from app.agent.resume_io import extract_text
+    from app import storage
+
+    _upload(client)
+    key = storage.upsert_job(
+        {"job_url": "https://x/old", "title": "Role", "company": "Acme", "description": "A real description."}
+    )
+    row = storage.insert_resume_rewrite(
+        {
+            "id": "old-null-path",
+            "job_key": key,
+            "status": "done",
+            "docx_path": None,
+        }
+    )
+    assert row["docx_ready"] is False
+    listed = client.get(f"/jobs/{key}/resume-rewrites").json()["rewrites"]
+    assert listed[0]["id"] == "old-null-path"
+    assert listed[0]["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/old-null-path/docx")
+    assert download.status_code == 200
+    assert extract_text(download.content) == extract_text(_docx_bytes())
+
+
+def test_download_finds_file_when_stored_path_is_from_docker(client):
+    from app.agent.resume_io import extract_text
+    from app.config import DB_PATH
+    from app import storage
+
+    _upload(client)
+    key = storage.upsert_job(
+        {"job_url": "https://x/docker-path", "title": "Role", "company": "Acme", "description": "A real description."}
+    )
+    folder = DB_PATH.parent / "rewrites"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "Rohil_Chaturvedi_Acme.docx").write_bytes(_docx_bytes())
+    storage.insert_resume_rewrite(
+        {
+            "id": "docker-path",
+            "job_key": key,
+            "status": "done",
+            "docx_path": "/app/data/rewrites/Rohil_Chaturvedi_Acme.docx",
+        }
+    )
+    listed = client.get(f"/jobs/{key}/resume-rewrites").json()["rewrites"]
+    assert listed[0]["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/docker-path/docx")
+    assert download.status_code == 200
+    assert extract_text(download.content) == extract_text(_docx_bytes())
+
+
+def test_latest_failed_still_offers_an_older_file(client, monkeypatch):
+    from app.agent.resume_io import extract_text
+    from app.config import DB_PATH
+    from app import storage
+    import app.agent.resume_rewrite as rewrite_module
+
+    _upload(client)
+    key = storage.upsert_job(
+        {"job_url": "https://x/older", "title": "Role", "company": "Acme", "description": "A real description."}
+    )
+    folder = DB_PATH.parent / "rewrites"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "Rohil_Chaturvedi_Acme.docx"
+    path.write_bytes(_docx_bytes())
+    storage.insert_resume_rewrite(
+        {
+            "id": "older-ready",
+            "job_key": key,
+            "status": "done",
+            "docx_path": str(path),
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }
+    )
+
+    class _Boom:
+        def __init__(self, config=None):
+            self.config = config
+
+        def parse(self, messages, text_format, temperature=0.0, label="ai-call"):
+            raise RuntimeError("unusable")
+
+    monkeypatch.setattr(rewrite_module, "AIClient", _Boom)
+    response = client.post(f"/jobs/{key}/resume-rewrite", json={"max_tries": 1})
+    latest = _finished(client, key, response.json()["id"])
+    assert latest["error"]
+    assert latest["docx_ready"] is True
+    listed = client.get(f"/jobs/{key}/resume-rewrites").json()["rewrites"]
+    assert listed[0]["id"] == latest["id"]
+    older = next(row for row in listed if row["id"] == "older-ready")
+    assert older["docx_ready"] is True
+    download = client.get(f"/jobs/{key}/resume-rewrites/older-ready/docx")
+    assert download.status_code == 200
+    assert extract_text(download.content) == extract_text(_docx_bytes())
 
 
 def test_non_unique_and_ungrounded_patches_are_dropped():
